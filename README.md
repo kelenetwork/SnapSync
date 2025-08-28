@@ -121,7 +121,7 @@ rm -rf /var/log/system_snapshot
 
 ## 📄 许可证
 
-MIT（可根据需要更改）
+MIT
 
 ---
 
