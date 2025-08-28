@@ -38,7 +38,9 @@
 
 3. 运行脚本：
    ```bash
-   ./system_snapshot.sh
+   cd ~/SnapSync
+chmod +x SnapSync
+./SnapSync
    ```
 
 4. 查看日志：
