@@ -1,11 +1,7 @@
 #!/bin/bash
 
 # 精简增强版交互式系统快照备份工具安装脚本
-# 版本: v2.2-sshopts (统一 SSH_OPTS/兼容 Dropbear/强制公钥)
-# 变更要点：
-# - 新增 SSH_OPTS 与 ssh_cmd/scp_cmd 封装，所有 ssh/rsync 调用统一走端口+公钥
-# - 安装器与生成的主脚本都使用同一套 SSH 连接参数
-# - 提示 Dropbear 的 authorized_keys 路径（/etc/dropbear/authorized_keys）
+# 版本: v2.3-sshopts+tg (统一 SSH_OPTS/Dropbear 兼容/rsync→scp 回退/阶段TG通知/BusyBox 清理兼容)
 
 # ====================================================================
 # ## USER CONFIGURATION ##
@@ -120,6 +116,16 @@ validate_config() {
     if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
         error_exit "SSH端口无效: $SSH_PORT"
     fi
+}
+
+# Telegram 发送（安装器阶段）
+send_tg_installer() {
+  local title="$1"; shift
+  local msg="$1"; shift
+  [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ] && return 0
+  curl -sS -m 15 "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+    -d chat_id="$CHAT_ID" \
+    --data-urlencode text="$title\n$msg" >/dev/null 2>&1 || true
 }
 
 # 配置收集函数
@@ -368,9 +374,18 @@ trap 'flock -u 200' EXIT
 log_info() { echo "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE"; }
 log_error() { echo "$(date '+%F %T') [ERROR] $1" | tee -a "$LOG_FILE"; }
 
+# Telegram（主脚本阶段）
+send_tg() {
+  [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ] && return 0
+  local text="$1"
+  curl -sS -m 15 "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+    -d chat_id="$CHAT_ID" \
+    --data-urlencode text="$text" >/dev/null 2>&1 || true
+}
+
 # 重试机制
 retry_command() {
-    local max_attempts="$MAX_RETRY_ATTEMPTS"
+    local max_attempts="${MAX_RETRY_ATTEMPTS:-3}"
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         if eval "$*"; then return 0; fi
@@ -411,8 +426,9 @@ check_disk_space() {
     local disk_usage
     disk_usage=$(echo "$disk_info" | awk '{print $5}' | sed 's/%//')
     if ! [[ "$disk_usage" =~ ^[0-9]+$ ]]; then log_error "无法解析磁盘使用率"; return 1; fi
-    if [ "$disk_usage" -gt "$DISK_SPACE_THRESHOLD" ]; then
+    if [ "$disk_usage" -gt "${DISK_SPACE_THRESHOLD:-85}" ]; then
         log_error "磁盘空间不足: ${disk_usage}% > ${DISK_SPACE_THRESHOLD}%"
+        send_tg "❌ 备份失败（空间不足）\n磁盘使用率: ${disk_usage}% > ${DISK_SPACE_THRESHOLD}%\n时间: $(date '+%F %T')"
         return 1
     fi
 }
@@ -420,6 +436,7 @@ check_disk_space() {
 # 创建快照
 create_snapshot() {
     local start_time=$(date +%s)
+    send_tg "🔄 开始创建系统快照\n主机: $(hostname)\n时间: $(date '+%F %T')\n保存目录: $BACKUP_DIR"
     log_info "开始创建系统快照..."
     check_disk_space || return 1
     
@@ -439,6 +456,7 @@ create_snapshot() {
     if [ ! -s "$SNAPSHOT_FILE" ]; then
         local error_msg=$(cat /tmp/snapshot_error.log 2>/dev/null || echo "未知错误")
         log_error "快照创建失败: $error_msg"
+        send_tg "❌ 快照创建失败\n错误: $error_msg\n时间: $(date '+%F %T')"
         return 1
     fi
     
@@ -446,6 +464,7 @@ create_snapshot() {
     local duration=$((end_time - start_time))
     local snapshot_size=$(du -h "$SNAPSHOT_FILE" | cut -f1)
     log_info "快照创建成功: $SNAPSHOT_FILE ($snapshot_size, 耗时: ${duration}s)"
+    send_tg "📸 快照创建成功\n文件: $(basename "$SNAPSHOT_FILE")\n大小: $snapshot_size\n耗时: ${duration}s\n时间: $(date '+%F %T')"
 }
 
 # 清理本地旧快照
@@ -454,32 +473,57 @@ cleanup_local() {
     find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | sort -r | tail -n +$((LOCAL_SNAPSHOT_KEEP+1)) | xargs -r rm -f
 }
 
-# 上传到远程
+# 上传到远程（带 rsync→scp 回退 & BusyBox 清理）
 upload_snapshot() {
     log_info "开始上传快照到远程服务器..."
+    send_tg "⬆️ 开始上传到远程\n服务器: $TARGET_USER@$TARGET_IP:$SSH_PORT\n目录: $FULL_REMOTE_PATH/system_snapshots"
     if ! retry_command "ssh_cmd '$TARGET_USER@$TARGET_IP' 'echo 连接测试' >/dev/null"; then
         log_error "无法连接到远程服务器"
+        send_tg "⚠️ 远程上传失败\n原因: 无法通过 SSH 连接到远程 $TARGET_USER@$TARGET_IP:$SSH_PORT"
         return 1
     fi
     
+    # 确保远程目录存在
+    ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p '$FULL_REMOTE_PATH/system_snapshots'"
+
     local upload_start_time=$(date +%s)
     local snapshot_size_bytes=$(du -b "$SNAPSHOT_FILE" | cut -f1)
-    
-    if retry_command "rsync -avz --timeout=300 -e \"ssh -i '$SSH_KEY' -p '$SSH_PORT' $SSH_OPTS\" \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
-        local upload_end_time=$(date +%s)
-        local upload_duration=$((upload_end_time - upload_start_time))
-        local upload_speed="N/A"
-        if [ "$upload_duration" -gt 0 ]; then
-            local upload_speed_bps=$((snapshot_size_bytes / upload_duration))
-            upload_speed="$(format_bytes $upload_speed_bps)/s"
+    local used_method=""
+
+    # 判断远端是否有 rsync（若无则回退到 scp）
+    if ssh_cmd "$TARGET_USER@$TARGET_IP" "command -v rsync >/dev/null 2>&1"; then
+        if retry_command "rsync -avz --timeout=300 -e \"ssh -i '$SSH_KEY' -p '$SSH_PORT' $SSH_OPTS\" \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
+            used_method="rsync"
+        else
+            log_error "rsync 失败，尝试使用 scp 回退"
+            used_method="scp"
+            if ! retry_command "scp -i '$SSH_KEY' -P '$SSH_PORT' -o IdentitiesOnly=yes \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
+                send_tg "❌ 远程上传失败（rsync→scp 均失败）\n文件: $(basename "$SNAPSHOT_FILE")"
+                return 1
+            fi
         fi
-        log_info "快照上传成功 (用时: ${upload_duration}s, 速度: ${upload_speed})"
-        
-        # 清理远程旧快照
-        ssh_cmd "$TARGET_USER@$TARGET_IP" "find $FULL_REMOTE_PATH/system_snapshots -type f -name '*.tar.gz' -mtime +$REMOTE_SNAPSHOT_DAYS -delete"
     else
-        log_error "快照上传失败"
+        used_method="scp"
+        if ! retry_command "scp -i '$SSH_KEY' -P '$SSH_PORT' -o IdentitiesOnly=yes \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
+            send_tg "❌ 远程上传失败（scp）\n文件: $(basename "$SNAPSHOT_FILE")"
+            return 1
+        fi
     fi
+
+    local upload_end_time=$(date +%s)
+    local upload_duration=$((upload_end_time - upload_start_time))
+    local upload_speed="N/A"
+    if [ "$upload_duration" -gt 0 ]; then
+        local upload_speed_bps=$((snapshot_size_bytes / upload_duration))
+        upload_speed="$(format_bytes $upload_speed_bps)/s"
+    fi
+    
+    log_info "快照上传成功 (用时: ${upload_duration}s, 速度: ${upload_speed}, 方式: ${used_method})"
+    send_tg "✅ 上传成功（${used_method}）\n文件: $(basename "$SNAPSHOT_FILE")\n用时: ${upload_duration}s\n速度: ${upload_speed}\n远程目录: $FULL_REMOTE_PATH/system_snapshots"
+
+    # BusyBox 兼容的远程清理：用 -exec rm -f 代替 -delete
+    ssh_cmd "$TARGET_USER@$TARGET_IP" "find '$FULL_REMOTE_PATH/system_snapshots' -type f -name '*.tar.gz' -mtime +$REMOTE_SNAPSHOT_DAYS -exec rm -f {} \;"
+    send_tg "🧹 已执行远程清理（>$REMOTE_SNAPSHOT_DAYS 天）\n目录: $FULL_REMOTE_PATH/system_snapshots"
 }
 
 # systemd定时器设置
@@ -526,6 +570,7 @@ EOFTIMER
     
     log_info "定时器已设置: 1小时后首次运行，之后每${BACKUP_INTERVAL_DAYS}天执行一次"
     log_info "计算得出的下次运行时间: $next_run_cst"
+    send_tg "⏰ 定时任务更新\n首次: 1小时后\n频率: 每${BACKUP_INTERVAL_DAYS}天\n下次运行: $next_run_cst"
 }
 
 # 主执行流程
@@ -537,11 +582,12 @@ create_snapshot && cleanup_local && upload_snapshot
 
 log_info "系统快照操作全部完成"
 
-# 汇总统计（省略 TG 通知，安装器有）
+# 汇总统计 & TG 完成通知
 TOTAL_LOCAL_SNAPSHOTS=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | wc -l)
 TOTAL_LOCAL_SIZE_BYTES=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" -exec du -b {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
 TOTAL_LOCAL_SIZE=$(format_bytes "${TOTAL_LOCAL_SIZE_BYTES:-0}")
 log_info "本地快照数量: ${TOTAL_LOCAL_SNAPSHOTS} 个, 总大小: ${TOTAL_LOCAL_SIZE}"
+send_tg "✅ 任务完成 | $(hostname)\n本地快照: ${TOTAL_LOCAL_SNAPSHOTS} 个\n本地总大小: ${TOTAL_LOCAL_SIZE}\n时间: $(date '+%F %T')"
 EOF
 
     chmod +x "$SCRIPT_FILE"
