@@ -28,8 +28,12 @@
 
 ```bash
 git clone https://github.com/kelenetwork/SnapSync.git
+```
+```bash
 cd SnapSync
 chmod +x SnapSync remote_restore
+```
+```bash
 ./SnapSync
 ```
 
