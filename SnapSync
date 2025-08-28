@@ -182,11 +182,18 @@ setup_ssh_key(){
 
 test_telegram(){
   show_title "Telegram通知测试"
+  local msg="🚀 系统快照备份工具安装测试\n时间: $(date '+%F %T')\n主机: $(hostname)"
+  local rendered=$(printf "%b" "$msg")
   response=$(curl -s "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
     -d chat_id="$CHAT_ID" \
-    -d text="🚀 系统快照备份工具安装测试\n时间: $(date '+%F %T')\n主机: $(hostname)")
-  [[ $response == *"\"ok\":true"* ]] && log "${GREEN}✓ Telegram通知测试成功！${NC}\n" || log "${RED}✗ Telegram通知发送失败，请检查配置${NC}\n"
+    --data-urlencode text="$rendered")
+  if [[ $response == *"\"ok\":true"* ]]; then
+    log "${GREEN}✓ Telegram通知测试成功！${NC}\n"
+  else
+    log "${RED}✗ Telegram通知发送失败，请检查配置${NC}\n"
+  fi
 }
+
 
 create_script(){
   show_title "创建备份脚本"
