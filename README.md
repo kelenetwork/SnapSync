@@ -14,7 +14,7 @@
 
 1. 克隆或下载脚本：
    ```bash
-   git clone https://github.com/你的用户名/SnapSync.git
+   git clone https://github.com/kelenetwork/SnapSync.git
    cd SnapSync
    chmod +x system_snapshot.sh
    ```
@@ -27,9 +27,9 @@
 
    # 远程服务器配置
    TARGET_IP="远端服务器IP"
-   TARGET_USER="hyper"
+   TARGET_USER="root"
    SSH_PORT="22"
-   TARGET_BASE_DIR="/home/hyper/Remote_backup"
+   TARGET_BASE_DIR="/root/Remote_backup"
    REMOTE_DIR_NAME=""
 
    # 本地目录
