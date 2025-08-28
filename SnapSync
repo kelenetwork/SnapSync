@@ -23,7 +23,7 @@ CHAT_ID=""
 TARGET_IP=""
 TARGET_USER="root"
 SSH_PORT=""                 # 例: 22 或 2288（frp 映射）
-TARGET_BASE_DIR="/root/Remote_backup"
+TARGET_BASE_DIR="/mnt/wd/Remote_backup"  # 例: /root/Remote_backup
 REMOTE_DIR_NAME=""
 
 # --- 本地配置 ---
