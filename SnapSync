@@ -8,7 +8,7 @@
 # - BusyBox 兼容清理（-exec rm -f）
 # - rsync→scp 自动回退
 # - 远端空间检查（快照大小+200MB余量）
-# - 上传统计（大小/耗时/平均速度/上传后可用）
+# - 上传统计（大小/耗时/平均速度）
 # - Telegram 阶段通知；修复 \n 换行显示
 
 # ====================================================================
@@ -304,7 +304,11 @@ create_snapshot(){
   if [ ! -s "$SNAPSHOT_FILE" ]; then local err=$(cat /tmp/snapshot_error.log 2>/dev/null || echo "未知错误")
     log_error "快照创建失败: $err"; send_tg "❌ 快照创建失败\n错误: $err\n时间: $(date '+%F %T')"; return 1; fi
 
-  local end=$(date +%s) dur=$((end-start)) size=$(du -h "$SNAPSHOT_FILE" | cut -f1)
+  # 修正：分开赋值，避免负数/空值
+  local end; end=$(date +%s)
+  local dur=$(( end - start ))
+  local size=$(du -h "$SNAPSHOT_FILE" | cut -f1)
+
   log_info "快照创建成功: $SNAPSHOT_FILE ($size, 耗时: ${dur}s)"
   send_tg "📸 快照创建成功\n文件: $(basename "$SNAPSHOT_FILE")\n大小: $size\n耗时: ${dur}s"
 }
@@ -342,12 +346,13 @@ upload_snapshot(){
     retry_command "scp -i '$SSH_KEY' -P '$SSH_PORT' -o IdentitiesOnly=yes \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\"" || { send_tg "❌ 远程上传失败（rsync→scp 均失败）\n文件: $SNAP_NAME"; return 1; }
   fi
 
-  local end=$(date +%s) dur=$((end-start))
-  local spd="N/A"; [ "$dur" -gt 0 ] && spd="$(format_bytes $((SNAP_BYTES/dur)))/s"
-  local FREE_AFTER="$(remote_free_bytes "$BASE_DIR")"
+  # 修正：分开赋值，避免负数/空值；并移除“上传后可用”
+  local end; end=$(date +%s)
+  local dur=$(( end - start ))
+  local spd="N/A"; if [ "$dur" -gt 0 ]; then spd="$(format_bytes $((SNAP_BYTES/dur)))/s"; fi
 
   log_info "快照上传成功 (用时: ${dur}s, 速度: ${spd}, 方式: ${used})"
-  send_tg "✅ 上传成功（${used}）\n文件: $SNAP_NAME\n用时: ${dur}s\n平均速度: ${spd}\n目标: $FULL_REMOTE_PATH/system_snapshots\n上传后可用: $(format_bytes ${FREE_AFTER:-0})"
+  send_tg "✅ 上传成功（${used}）\n文件: $SNAP_NAME\n用时: ${dur}s\n平均速度: ${spd}\n目标: $FULL_REMOTE_PATH/system_snapshots"
 
   # BusyBox 兼容清理（删除超过保留天数的快照）
   ssh_cmd "$TARGET_USER@$TARGET_IP" "find '$FULL_REMOTE_PATH/system_snapshots' -type f -name '*.tar.gz' -mtime +$REMOTE_SNAPSHOT_DAYS -exec rm -f {} \;"
