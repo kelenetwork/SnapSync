@@ -188,7 +188,34 @@ collect_config() {
         log "\n${CYAN}ℹ️ 使用预设的远程目录名: $REMOTE_DIR_NAME${NC}"
     fi
 
-    FULL_REMOTE_PATH="$TARGET_BASE_DIR/$REMOTE_DIR_NAME"
+    # 远端存储路径自动选择：优先用外置硬盘 /mnt/wd，其次用配置的 TARGET_BASE_DIR
+remote_pick_base_dir() {
+  # 你也可以在这里按需追加候选，比如 "/mnt/mmc1-4/Remote_backup"
+  local candidates=("$TARGET_BASE_DIR" "/mnt/wd/Remote_backup")
+  local need_bytes
+  need_bytes=$(du -b "$SNAPSHOT_FILE" 2>/dev/null | awk '{print $1+200*1024*1024}' )  # 预留额外200MB
+
+  for base in "${candidates[@]}"; do
+    # 确保目录存在（存在则忽略错误）
+    ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p \"${base%/}\"" >/dev/null 2>&1 || true
+
+    # 查询该挂载点的可用空间（字节）
+    local avail
+    avail=$(ssh_cmd "$TARGET_USER@$TARGET_IP" "df -P \"${base%/}\" | awk 'NR==2{print \$4*1024}'" 2>/dev/null | tr -d '\r')
+
+    # 如果能拿到空间并且足够，就用它
+    if [ -n "$avail" ] && [ "$avail" -ge "${need_bytes:-0}" ]; then
+      echo "${base%/}"
+      return 0
+    fi
+  done
+
+  # 都不满足时，仍回落到配置的 TARGET_BASE_DIR（可能失败，但保持兼容）
+  echo "$TARGET_BASE_DIR"
+}
+
+FULL_REMOTE_PATH="$(remote_pick_base_dir)/$REMOTE_DIR_NAME"
+
     log "${GREEN}✓ 远程完整路径: $FULL_REMOTE_PATH${NC}\n"
 
     # 本地配置
