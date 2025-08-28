@@ -1,11 +1,18 @@
 #!/bin/bash
 
 # 精简增强版交互式系统快照备份工具安装脚本
-# 版本: v2.3-sshopts+tg (统一 SSH_OPTS/Dropbear 兼容/rsync→scp 回退/阶段TG通知/BusyBox 清理兼容)
+# 版本: v2.4-ultimate
+# 更新点：
+# - 统一 SSH_OPTS/强制公钥；Dropbear 兼容
+# - 远端路径自动选择（优先 /mnt/wd/Remote_backup）
+# - BusyBox 兼容清理（-exec rm -f）
+# - rsync→scp 自动回退
+# - 远端空间检查（快照大小+200MB余量）
+# - 上传统计（大小/耗时/平均速度/上传后可用）
+# - Telegram 阶段通知；修复 \n 换行显示
 
 # ====================================================================
 # ## USER CONFIGURATION ##
-# 在运行脚本前，您可以直接在此处修改默认值，以实现快速部署
 # ====================================================================
 
 # --- Telegram 配置 ---
@@ -15,7 +22,7 @@ CHAT_ID=""
 # --- 远程 SSH 服务器配置 ---
 TARGET_IP=""
 TARGET_USER="root"
-SSH_PORT=""                 # 例: 22 或 2288
+SSH_PORT=""                 # 例: 22 或 2288（frp 映射）
 TARGET_BASE_DIR="/root/Remote_backup"
 REMOTE_DIR_NAME=""
 
@@ -40,15 +47,11 @@ MEMORY_THRESHOLD="80"               # 内存使用率阈值(%)
 # 脚本核心代码
 # ====================================================================
 
-# 颜色设置
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# 颜色
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# 标准化路径定义
+# 路径
 CONFIG_DIR="/etc/system_snapshot"
 CONFIG_FILE="$CONFIG_DIR/config.conf"
 SCRIPT_DIR="/usr/local/sbin"
@@ -58,511 +61,297 @@ INSTALL_LOG_FILE="$LOG_DIR/install.log"
 SNAPSHOT_LOG_FILE="$LOG_DIR/snapshot.log"
 DEBUG_LOG_FILE="$LOG_DIR/debug.log"
 
-# ==== 统一 SSH 连接参数（强制公钥；端口可配）====
+# 统一 SSH 连接参数
 SSH_KEY="/root/.ssh/id_ed25519"
 SSH_OPTS='-o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts'
-ssh_cmd() {  # 用法：ssh_cmd user@host "cmd"
+ssh_cmd() {  # ssh_cmd user@host "cmd"
   local host="$1"; shift
   eval ssh -i "\"$SSH_KEY\"" -p "\"$SSH_PORT\"" $SSH_OPTS "\"$host\"" "\"$@\""
 }
-scp_cmd() {  # 用法：scp_cmd 源 目标
+scp_cmd() {  # scp_cmd 源 目标
   eval scp -i "\"$SSH_KEY\"" -P "\"$SSH_PORT\"" -o IdentitiesOnly=yes "\"$@\""
 }
 
-# 日志函数
-log() {
-    mkdir -p "$LOG_DIR"
-    echo -e "$1" | tee -a "$INSTALL_LOG_FILE"
-}
+# 日志
+log(){ mkdir -p "$LOG_DIR"; echo -e "$1" | tee -a "$INSTALL_LOG_FILE"; }
+error_exit(){ log "${RED}错误: $1${NC}"; exit 1; }
+show_title(){ echo -e "\n${BLUE}============================================================${NC}\n${CYAN}$1${NC}\n${BLUE}============================================================${NC}\n"; }
 
-# 错误处理函数
-error_exit() {
-    log "${RED}错误: $1${NC}"
-    exit 1
-}
-
-# 显示带边框的标题
-show_title() {
-    local title="$1"
-    echo -e "\n${BLUE}============================================================${NC}"
-    echo -e "${CYAN}${title}${NC}"
-    echo -e "${BLUE}============================================================${NC}\n"
-}
-
-# 验证必要条件
-check_requirements() {
-    if [ "$EUID" -ne 0 ]; then
-        error_exit "请使用root权限运行此脚本"
-    fi
-    for cmd in curl ssh rsync tar git hostname jq bc; do
-        if ! command -v $cmd &> /dev/null; then
-            log "${YELLOW}安装 $cmd...${NC}"
-            apt-get update && apt-get install -y $cmd || error_exit "无法安装 $cmd"
-        fi
-    done
-    # 尝试安装pigz用于多线程压缩
-    if ! command -v pigz &> /dev/null; then
-        apt-get install -y pigz 2>/dev/null || log "${YELLOW}pigz 安装失败，将使用 gzip${NC}"
-    fi
-}
-
-# 简化的配置验证
-validate_config() {
-    for param in BOT_TOKEN CHAT_ID TARGET_IP; do
-        if [ -z "${!param}" ]; then
-            error_exit "配置参数 $param 不能为空"
-        fi
-    done
-    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
-        error_exit "SSH端口无效: $SSH_PORT"
-    fi
-}
-
-# Telegram 发送（安装器阶段）
-send_tg_installer() {
-  local title="$1"; shift
-  local msg="$1"; shift
-  [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ] && return 0
-  curl -sS -m 15 "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-    -d chat_id="$CHAT_ID" \
-    --data-urlencode text="$title\n$msg" >/dev/null 2>&1 || true
-}
-
-# 配置收集函数
-collect_config() {
-    show_title "系统快照备份配置向导"
-    log "${CYAN}ℹ️ 将加载脚本顶部的预设值作为默认项，可直接回车使用。${NC}\n"
-
-    # Telegram配置
-    log "${YELLOW}📱 Telegram 通知配置:${NC}"
-    read -p "请输入 Telegram Bot Token [当前: ${BOT_TOKEN:0:8}...]: " INPUT
-    BOT_TOKEN=${INPUT:-$BOT_TOKEN}
-    while [ -z "$BOT_TOKEN" ]; do
-        log "${RED}Bot Token 不能为空${NC}"
-        read -p "请输入 Telegram Bot Token: " BOT_TOKEN
-    done
-
-    read -p "请输入 Telegram Chat ID [当前: $CHAT_ID]: " INPUT
-    CHAT_ID=${INPUT:-$CHAT_ID}
-    while [ -z "$CHAT_ID" ]; do
-        log "${RED}Chat ID 不能为空${NC}"
-        read -p "请输入 Telegram Chat ID: " CHAT_ID
-    done
-    echo
-
-    # 远程服务器配置
-    log "${YELLOW}🌐 远程服务器配置:${NC}"
-    read -p "请输入远程服务器IP地址 [当前: $TARGET_IP]: " INPUT
-    TARGET_IP=${INPUT:-$TARGET_IP}
-    while [ -z "$TARGET_IP" ]; do
-        log "${RED}IP地址不能为空${NC}"
-        read -p "请输入远程服务器IP地址: " TARGET_IP
-    done
-
-    read -p "请输入远程服务器用户名 [默认: $TARGET_USER]: " INPUT
-    TARGET_USER=${INPUT:-$TARGET_USER}
-
-    read -p "请输入SSH端口 [默认: $SSH_PORT]: " INPUT
-    SSH_PORT=${INPUT:-$SSH_PORT}
-    echo
-
-    # 远程目录配置
-    log "${YELLOW}📁 远程存储配置:${NC}"
-    read -p "请输入远程基础备份目录 [默认: $TARGET_BASE_DIR]: " INPUT
-    TARGET_BASE_DIR=${INPUT:-$TARGET_BASE_DIR}
-
-    HOSTNAME=$(hostname)
-    if [ -z "$REMOTE_DIR_NAME" ]; then
-        REMOTE_DIR_NAME="$HOSTNAME"
-        log "\n${CYAN}ℹ️ 本机将在远程创建目录: $TARGET_BASE_DIR/$REMOTE_DIR_NAME${NC}"
-        read -p "是否使用此默认目录名 '$REMOTE_DIR_NAME'? [Y/n]: " USE_DEFAULT_HOSTNAME
-        if [[ "$USE_DEFAULT_HOSTNAME" =~ ^[Nn]$ ]]; then
-            read -p "请输入自定义目录名: " CUSTOM_HOSTNAME
-            while [ -z "$CUSTOM_HOSTNAME" ]; do
-                log "${RED}目录名不能为空${NC}"
-                read -p "请输入自定义目录名: " CUSTOM_HOSTNAME
-            done
-            REMOTE_DIR_NAME="$CUSTOM_HOSTNAME"
-        fi
-    else
-        log "\n${CYAN}ℹ️ 使用预设的远程目录名: $REMOTE_DIR_NAME${NC}"
-    fi
-
-    # 远端存储路径自动选择：优先用外置硬盘 /mnt/wd，其次用配置的 TARGET_BASE_DIR
-remote_pick_base_dir() {
-  # 你也可以在这里按需追加候选，比如 "/mnt/mmc1-4/Remote_backup"
-  local candidates=("$TARGET_BASE_DIR" "/mnt/wd/Remote_backup")
-  local need_bytes
-  need_bytes=$(du -b "$SNAPSHOT_FILE" 2>/dev/null | awk '{print $1+200*1024*1024}' )  # 预留额外200MB
-
-  for base in "${candidates[@]}"; do
-    # 确保目录存在（存在则忽略错误）
-    ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p \"${base%/}\"" >/dev/null 2>&1 || true
-
-    # 查询该挂载点的可用空间（字节）
-    local avail
-    avail=$(ssh_cmd "$TARGET_USER@$TARGET_IP" "df -P \"${base%/}\" | awk 'NR==2{print \$4*1024}'" 2>/dev/null | tr -d '\r')
-
-    # 如果能拿到空间并且足够，就用它
-    if [ -n "$avail" ] && [ "$avail" -ge "${need_bytes:-0}" ]; then
-      echo "${base%/}"
-      return 0
-    fi
+check_requirements(){
+  [ "$EUID" -ne 0 ] && error_exit "请使用 root 权限运行"
+  for cmd in curl ssh rsync tar git hostname jq bc; do
+    command -v "$cmd" >/dev/null 2>&1 || { log "${YELLOW}安装 $cmd...${NC}"; apt-get update && apt-get install -y "$cmd" || error_exit "无法安装 $cmd"; }
   done
-
-  # 都不满足时，仍回落到配置的 TARGET_BASE_DIR（可能失败，但保持兼容）
-  echo "$TARGET_BASE_DIR"
+  command -v pigz >/dev/null 2>&1 || apt-get install -y pigz >/dev/null 2>&1 || log "${YELLOW}pigz 安装失败，将使用 gzip${NC}"
 }
 
-FULL_REMOTE_PATH="$(remote_pick_base_dir)/$REMOTE_DIR_NAME"
-
-    log "${GREEN}✓ 远程完整路径: $FULL_REMOTE_PATH${NC}\n"
-
-    # 本地配置
-    log "${YELLOW}💾 本地配置:${NC}"
-    read -p "请输入本地备份目录 [默认: $BACKUP_DIR]: " INPUT
-    BACKUP_DIR=${INPUT:-$BACKUP_DIR}
-
-    # 保留策略
-    log "\n${YELLOW}🗄️ 备份保留策略:${NC}"
-    read -p "请输入本地保留快照数量 [默认: $LOCAL_SNAPSHOT_KEEP]: " INPUT
-    LOCAL_SNAPSHOT_KEEP=${INPUT:-$LOCAL_SNAPSHOT_KEEP}
-
-    read -p "请输入远程快照保留天数 [默认: $REMOTE_SNAPSHOT_DAYS]: " INPUT
-    REMOTE_SNAPSHOT_DAYS=${INPUT:-$REMOTE_SNAPSHOT_DAYS}
-    echo
-
-    # 自动执行间隔
-    log "${YELLOW}⏰ 自动执行配置:${NC}"
-    read -p "请输入备份间隔天数 (1-30) [默认: $BACKUP_INTERVAL_DAYS]: " INPUT
-    BACKUP_INTERVAL_DAYS=${INPUT:-$BACKUP_INTERVAL_DAYS}
-    while [[ ! "$BACKUP_INTERVAL_DAYS" =~ ^[1-9]$|^[1-2][0-9]$|^30$ ]]; do
-        log "${RED}请输入1-30之间的数字${NC}"
-        read -p "请输入备份间隔天数 [默认: 5]: " INPUT
-        BACKUP_INTERVAL_DAYS=${INPUT:-5}
-    done
-
-    read -p "是否需要立即执行一次快照测试？[Y/n]: " INPUT
-    RUN_NOW=${INPUT:-$RUN_NOW}
-    echo
-
-    # 验证配置
-    validate_config
-
-    # 配置预览
-    show_title "配置预览"
-    log "${CYAN}远程服务器:${NC} $TARGET_USER@$TARGET_IP:$SSH_PORT"
-    log "${CYAN}远程路径:${NC} $FULL_REMOTE_PATH"
-    log "${CYAN}本地路径:${NC} $BACKUP_DIR"
-    log "${CYAN}保留策略:${NC} 本地${LOCAL_SNAPSHOT_KEEP}个，远程${REMOTE_SNAPSHOT_DAYS}天"
-    log "${CYAN}自动执行:${NC} 每${BACKUP_INTERVAL_DAYS}天一次\n"
-
-    read -p "确认以上配置并继续？[Y/n]: " CONFIRM_CONFIG
-    if [[ "$CONFIRM_CONFIG" =~ ^[Nn]$ ]]; then
-        log "\n${YELLOW}配置已取消，请重新运行脚本进行配置${NC}"
-        exit 0
-    fi
+validate_config(){
+  for p in BOT_TOKEN CHAT_ID TARGET_IP; do
+    [ -z "${!p}" ] && error_exit "配置参数 $p 不能为空"
+  done
+  [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || error_exit "SSH端口无效: $SSH_PORT"
 }
 
-# SSH密钥配置
-setup_ssh_key() {
-    show_title "SSH密钥配置 (Ed25519)"
-    
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    
-    if [ ! -f "$SSH_KEY" ]; then
-        log "${YELLOW}生成新的 Ed25519 SSH 密钥...${NC}"
-        ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -q
+collect_config(){
+  show_title "系统快照备份配置向导"
+  log "${CYAN}ℹ️ 将加载脚本顶部的预设值作为默认项，可直接回车使用。${NC}\n"
+
+  log "${YELLOW}📱 Telegram 通知配置:${NC}"
+  read -p "请输入 Telegram Bot Token [当前: ${BOT_TOKEN:0:8}...]: " INPUT; BOT_TOKEN=${INPUT:-$BOT_TOKEN}
+  while [ -z "$BOT_TOKEN" ]; do read -p "请输入 Telegram Bot Token: " BOT_TOKEN; done
+  read -p "请输入 Telegram Chat ID [当前: $CHAT_ID]: " INPUT; CHAT_ID=${INPUT:-$CHAT_ID}
+  while [ -z "$CHAT_ID" ]; do read -p "请输入 Telegram Chat ID: " CHAT_ID; done; echo
+
+  log "${YELLOW}🌐 远程服务器配置:${NC}"
+  read -p "请输入远程服务器IP地址 [当前: $TARGET_IP]: " INPUT; TARGET_IP=${INPUT:-$TARGET_IP}
+  while [ -z "$TARGET_IP" ]; do read -p "请输入远程服务器IP地址: " TARGET_IP; done
+  read -p "请输入远程服务器用户名 [默认: $TARGET_USER]: " INPUT; TARGET_USER=${INPUT:-$TARGET_USER}
+  read -p "请输入SSH端口 [默认: $SSH_PORT]: " INPUT; SSH_PORT=${INPUT:-$SSH_PORT}; echo
+
+  log "${YELLOW}📁 远程存储配置:${NC}"
+  read -p "请输入远程基础备份目录 [默认: $TARGET_BASE_DIR]: " INPUT; TARGET_BASE_DIR=${INPUT:-$TARGET_BASE_DIR}
+
+  HOSTNAME=$(hostname)
+  if [ -z "$REMOTE_DIR_NAME" ]; then
+    REMOTE_DIR_NAME="$HOSTNAME"
+    log "\n${CYAN}ℹ️ 本机将在远程创建目录: $TARGET_BASE_DIR/$REMOTE_DIR_NAME${NC}"
+    read -p "是否使用此默认目录名 '$REMOTE_DIR_NAME'? [Y/n]: " USE_DEFAULT_HOSTNAME
+    if [[ "$USE_DEFAULT_HOSTNAME" =~ ^[Nn]$ ]]; then
+      read -p "请输入自定义目录名: " REMOTE_DIR_NAME; while [ -z "$REMOTE_DIR_NAME" ]; do read -p "目录名不能为空，请重新输入: " REMOTE_DIR_NAME; done
     fi
-    
-    log "${YELLOW}请将以下公钥添加到远程服务器：${NC}"
-    echo -e "${GREEN}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    cat "${SSH_KEY}.pub"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-    echo -e "${CYAN}如果远端是 OpenSSH：放到 ~/.ssh/authorized_keys"
-    echo -e "如果远端是 Dropbear：放到 /etc/dropbear/authorized_keys${NC}\n"
-    
-    read -p "已将公钥添加到远程服务器？继续测试连接... [Y/n]: " SSH_OK
-    if [[ ! "$SSH_OK" =~ ^[Nn]$ ]]; then
-        log "${YELLOW}测试SSH连接...${NC}"
-        if ssh_cmd "$TARGET_USER@$TARGET_IP" "echo 'SSH连接测试成功'"; then
-            log "${GREEN}✓ SSH连接测试成功！${NC}\n"
-            
-            log "${YELLOW}创建远程目录结构...${NC}"
-            if ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p $FULL_REMOTE_PATH/system_snapshots $FULL_REMOTE_PATH/configs $FULL_REMOTE_PATH/logs" ; then
-                log "${GREEN}✓ 远程目录创建成功: $FULL_REMOTE_PATH${NC}\n"
-            else
-                log "${YELLOW}⚠ 远程目录创建可能失败，请手动检查${NC}\n"
-            fi
-        else
-            log "${RED}✗ SSH连接失败。${NC}"
-            echo -e "${YELLOW}常见原因："
-            echo -e "1) 远端是 Dropbear，但公钥未放入 /etc/dropbear/authorized_keys"
-            echo -e "2) 端口不对（当前端口: ${SSH_PORT}）"
-            echo -e "3) 公钥权限/换行符问题（确保无 CRLF，文件权限 600）${NC}\n"
-            read -p "继续安装（将跳过远程备份）？[y/N]: " CONTINUE
-            if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
-        fi
-    fi
+  else
+    log "\n${CYAN}ℹ️ 使用预设的远程目录名: $REMOTE_DIR_NAME${NC}"
+  fi
+
+  FULL_REMOTE_PATH="$TARGET_BASE_DIR/$REMOTE_DIR_NAME"
+  log "${GREEN}✓ 远程完整路径: $FULL_REMOTE_PATH${NC}\n"
+
+  log "${YELLOW}💾 本地配置:${NC}"
+  read -p "请输入本地备份目录 [默认: $BACKUP_DIR]: " INPUT; BACKUP_DIR=${INPUT:-$BACKUP_DIR}
+
+  log "\n${YELLOW}🗄️ 备份保留策略:${NC}"
+  read -p "请输入本地保留快照数量 [默认: $LOCAL_SNAPSHOT_KEEP]: " INPUT; LOCAL_SNAPSHOT_KEEP=${INPUT:-$LOCAL_SNAPSHOT_KEEP}
+  read -p "请输入远程快照保留天数 [默认: $REMOTE_SNAPSHOT_DAYS]: " INPUT; REMOTE_SNAPSHOT_DAYS=${INPUT:-$REMOTE_SNAPSHOT_DAYS}; echo
+
+  log "${YELLOW}⏰ 自动执行配置:${NC}"
+  read -p "请输入备份间隔天数 (1-30) [默认: $BACKUP_INTERVAL_DAYS]: " INPUT; BACKUP_INTERVAL_DAYS=${INPUT:-$BACKUP_INTERVAL_DAYS}
+  while [[ ! "$BACKUP_INTERVAL_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]]; do read -p "请输入1-30之间的数字 [默认: 5]: " INPUT; BACKUP_INTERVAL_DAYS=${INPUT:-5}; done
+  read -p "是否需要立即执行一次快照测试？[Y/n]: " INPUT; RUN_NOW=${INPUT:-$RUN_NOW}; echo
+
+  validate_config
+
+  show_title "配置预览"
+  log "${CYAN}远程服务器:${NC} $TARGET_USER@$TARGET_IP:$SSH_PORT"
+  log "${CYAN}远程路径:${NC} $FULL_REMOTE_PATH"
+  log "${CYAN}本地路径:${NC} $BACKUP_DIR"
+  log "${CYAN}保留策略:${NC} 本地${LOCAL_SNAPSHOT_KEEP}个，远程${REMOTE_SNAPSHOT_DAYS}天"
+  log "${CYAN}自动执行:${NC} 每${BACKUP_INTERVAL_DAYS}天一次\n"
+
+  read -p "确认以上配置并继续？[Y/n]: " CONFIRM_CONFIG
+  [[ "$CONFIRM_CONFIG" =~ ^[Nn]$ ]] && { log "\n${YELLOW}配置已取消，请重新运行脚本进行配置${NC}"; exit 0; }
 }
 
-# 测试Telegram通知
-test_telegram() {
-    show_title "Telegram通知测试"
-    response=$(curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-        -d chat_id="$CHAT_ID" \
-        -d text="🚀 *系统快照备份工具安装测试*\n\n- 您正在使用系统快照备份工具\n- 时间: \`$(date '+%F %T')\`\n- 主机: \`$(hostname)\`" \
-        -d parse_mode="Markdown")
-    if [[ $response == *"\"ok\":true"* ]]; then
-        log "${GREEN}✓ Telegram通知测试成功！${NC}\n"
+setup_ssh_key(){
+  show_title "SSH密钥配置 (Ed25519)"
+  mkdir -p /root/.ssh; chmod 700 /root/.ssh
+  if [ ! -f "$SSH_KEY" ]; then log "${YELLOW}生成新的 Ed25519 SSH 密钥...${NC}"; ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -q; fi
+  log "${YELLOW}请将以下公钥添加到远程服务器：${NC}"
+  echo -e "${GREEN}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  cat "${SSH_KEY}.pub"
+  echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+  echo -e "${CYAN}OpenSSH：~/.ssh/authorized_keys${NC}"
+  echo -e "${CYAN}Dropbear：/etc/dropbear/authorized_keys${NC}\n"
+  read -p "已将公钥添加到远程服务器？继续测试连接... [Y/n]: " SSH_OK
+  if [[ ! "$SSH_OK" =~ ^[Nn]$ ]]; then
+    log "${YELLOW}测试SSH连接...${NC}"
+    if ssh_cmd "$TARGET_USER@$TARGET_IP" "echo 'SSH连接测试成功'"; then
+      log "${GREEN}✓ SSH连接测试成功！${NC}\n"
+      log "${YELLOW}创建远程目录结构...${NC}"
+      if ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p $FULL_REMOTE_PATH/system_snapshots $FULL_REMOTE_PATH/configs $FULL_REMOTE_PATH/logs"; then
+        log "${GREEN}✓ 远程目录创建成功: $FULL_REMOTE_PATH${NC}\n"
+      else
+        log "${YELLOW}⚠ 远程目录创建可能失败，请手动检查${NC}\n"
+      fi
     else
-        log "${RED}✗ Telegram通知发送失败，请检查配置${NC}\n"
+      log "${RED}✗ SSH连接失败。${NC}"
+      echo -e "${YELLOW}常见原因：\n1) Dropbear 未放入 /etc/dropbear/authorized_keys\n2) 端口错误（当前: ${SSH_PORT}）\n3) 公钥权限/换行符问题（确保无 CRLF，权限 600）${NC}\n"
+      read -p "继续安装（将跳过远程备份）？[y/N]: " CONTINUE; [[ ! "$CONTINUE" =~ ^[Yy]$ ]] && exit 1
     fi
+  fi
 }
 
-# 创建配置文件和主脚本
-create_script() {
-    show_title "创建备份脚本"
-    
-    mkdir -p "$BACKUP_DIR" "$CONFIG_DIR" "$SCRIPT_DIR" "$LOG_DIR"
-    
-    log "${YELLOW}创建配置文件...${NC}"
-    cat > "$CONFIG_FILE" << EOF
-#!/bin/bash
-# 系统快照备份配置文件 (由安装脚本自动生成于: $(date '+%F %T'))
+test_telegram(){
+  show_title "Telegram通知测试"
+  response=$(curl -s "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+    -d chat_id="$CHAT_ID" \
+    -d text="🚀 系统快照备份工具安装测试\n时间: $(date '+%F %T')\n主机: $(hostname)")
+  [[ $response == *"\"ok\":true"* ]] && log "${GREEN}✓ Telegram通知测试成功！${NC}\n" || log "${RED}✗ Telegram通知发送失败，请检查配置${NC}\n"
+}
 
-# Telegram配置
+create_script(){
+  show_title "创建备份脚本"
+  mkdir -p "$BACKUP_DIR" "$CONFIG_DIR" "$SCRIPT_DIR" "$LOG_DIR"
+
+  log "${YELLOW}创建配置文件...${NC}"
+  cat > "$CONFIG_FILE" << EOF
+#!/bin/bash
+# 配置文件 (自动生成: $(date '+%F %T'))
+
 BOT_TOKEN="$BOT_TOKEN"
 CHAT_ID="$CHAT_ID"
 
-# 远程服务器配置
 TARGET_IP="$TARGET_IP"
 TARGET_USER="$TARGET_USER"
 SSH_PORT="$SSH_PORT"
 TARGET_BASE_DIR="$TARGET_BASE_DIR"
 REMOTE_DIR_NAME="$REMOTE_DIR_NAME"
 
-# 本地配置
 BACKUP_DIR="$BACKUP_DIR"
 HOSTNAME=\$(hostname)
 
-# 保留策略
 LOCAL_SNAPSHOT_KEEP=$LOCAL_SNAPSHOT_KEEP
 REMOTE_SNAPSHOT_DAYS=$REMOTE_SNAPSHOT_DAYS
-
-# 执行配置
 BACKUP_INTERVAL_DAYS=$BACKUP_INTERVAL_DAYS
 
-# 高级配置
 DISK_SPACE_THRESHOLD="$DISK_SPACE_THRESHOLD"
 MAX_RETRY_ATTEMPTS="$MAX_RETRY_ATTEMPTS"
 LOAD_THRESHOLD_MULTIPLIER="$LOAD_THRESHOLD_MULTIPLIER"
 MEMORY_THRESHOLD="$MEMORY_THRESHOLD"
 
-# 日志文件
 LOG_FILE="$SNAPSHOT_LOG_FILE"
 DEBUG_LOG="$DEBUG_LOG_FILE"
 EOF
 
-    log "${YELLOW}创建主备份脚本...${NC}"
-    cat > "$SCRIPT_FILE" << 'EOF'
+  log "${YELLOW}创建主备份脚本...${NC}"
+  cat > "$SCRIPT_FILE" << 'EOF'
 #!/bin/bash
-
-# 加载配置
 source "/etc/system_snapshot/config.conf" || { echo "配置文件未找到"; exit 1; }
 
-# 统一 SSH 参数（与安装器一致）
 SSH_KEY="/root/.ssh/id_ed25519"
 SSH_OPTS='-o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts'
-ssh_cmd() {  # 用法：ssh_cmd user@host "cmd"
-  local host="$1"; shift
-  eval ssh -i "\"$SSH_KEY\"" -p "\"$SSH_PORT\"" $SSH_OPTS "\"$host\"" "\"$@\""
-}
+ssh_cmd(){ local host="$1"; shift; eval ssh -i "\"$SSH_KEY\"" -p "\"$SSH_PORT\"" $SSH_OPTS "\"$host\"" "\"$@\""; }
 
-# 变量设置
 TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 SNAPSHOT_FILE="$BACKUP_DIR/system_snapshot_${TIMESTAMP}.tar.gz"
-FULL_REMOTE_PATH="$TARGET_BASE_DIR/$REMOTE_DIR_NAME"
 LOCK_FILE="/tmp/system_snapshot.lock"
 
-# 进程锁 (使用flock避免竞争条件)
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
-    echo "脚本已在运行"
-    exit 1
-fi
-echo $$ >&200
-trap 'flock -u 200' EXIT
+exec 200>"$LOCK_FILE"; if ! flock -n 200; then echo "脚本已在运行"; exit 1; fi
+echo $$ >&200; trap 'flock -u 200' EXIT
 
-# 日志函数
-log_info() { echo "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE"; }
-log_error() { echo "$(date '+%F %T') [ERROR] $1" | tee -a "$LOG_FILE"; }
+log_info(){ echo "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE"; }
+log_error(){ echo "$(date '+%F %T') [ERROR] $1" | tee -a "$LOG_FILE"; }
 
-# Telegram（主脚本阶段）
-send_tg() {
+# Telegram 发送（把 \n 渲染为换行）
+send_tg(){
   [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ] && return 0
-  local text="$1"
+  local rendered; rendered=$(printf "%b" "$1")
   curl -sS -m 15 "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-    -d chat_id="$CHAT_ID" \
-    --data-urlencode text="$text" >/dev/null 2>&1 || true
+    -d chat_id="$CHAT_ID" --data-urlencode text="$rendered" >/dev/null 2>&1 || true
 }
 
-# 重试机制
-retry_command() {
-    local max_attempts="${MAX_RETRY_ATTEMPTS:-3}"
-    local attempt=1
-    while [ $attempt -le $max_attempts ]; do
-        if eval "$*"; then return 0; fi
-        log_info "命令失败，第 $attempt 次重试..."
-        sleep $((attempt * 3))
-        ((attempt++))
-    done
+retry_command(){ local max="${MAX_RETRY_ATTEMPTS:-3}" a=1; while [ $a -le $max ]; do eval "$@" && return 0; log_info "命令失败，第 $a 次重试..."; sleep $((a*3)); a=$((a+1)); done; return 1; }
+
+format_bytes(){ local b="$1"; [[ "$b" =~ [eE] ]] && b=$(awk '{printf "%.0f",$1}' <<<"$b"); [[ "$b" =~ ^[0-9]+$ ]] || { echo 0B; return; }
+  if [ "$b" -ge 1073741824 ]; then echo "$((b/1073741824)).$(((b%1073741824)*10/1073741824))GB";
+  elif [ "$b" -ge 1048576 ]; then echo "$((b/1048576)).$(((b%1048576)*10/1048576))MB";
+  elif [ "$b" -ge 1024 ]; then echo "$((b/1024)).$(((b%1024)*10/1024))KB"; else echo "${b}B"; fi; }
+
+check_disk_space(){ local info=$(df "$BACKUP_DIR" 2>/dev/null | tail -n1); [ -z "$info" ] && { log_error "无法获取磁盘信息"; return 1; }
+  local u=$(awk '{print $5}' <<<"$info" | tr -d '%'); [[ "$u" =~ ^[0-9]+$ ]] || { log_error "无法解析磁盘使用率"; return 1; }
+  if [ "$u" -gt "${DISK_SPACE_THRESHOLD:-85}" ]; then log_error "磁盘空间不足: ${u}% > ${DISK_SPACE_THRESHOLD}%";
+    send_tg "❌ 备份失败（空间不足）\n磁盘使用率: ${u}% > ${DISK_SPACE_THRESHOLD}%\n时间: $(date '+%F %T')"; return 1; fi; }
+
+# 远端 free 字节
+remote_free_bytes(){ local p="$1"; ssh_cmd "$TARGET_USER@$TARGET_IP" "df -P \"${p%/}\" | awk 'NR==2{print \$4*1024}'" 2>/dev/null | tr -d '\r'; }
+remote_mkdir(){ local d="$1"; ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p \"${d%/}\"" >/dev/null 2>&1 || true; }
+
+# 远端路径自动选择：优先 /mnt/wd/Remote_backup，其次配置的 TARGET_BASE_DIR
+pick_base_dir(){
+  local candidates=("/mnt/wd/Remote_backup" "$TARGET_BASE_DIR")
+  local need=$(( $(du -b "$SNAPSHOT_FILE" | cut -f1) + 200*1024*1024 ))
+  for base in "${candidates[@]}"; do
+    remote_mkdir "$base"
+    local free="$(remote_free_bytes "$base")"
+    if [ -n "$free" ] && [ "$free" -ge "$need" ]; then echo "$base"; return 0; fi
+  done
+  echo "$TARGET_BASE_DIR"
+}
+
+create_snapshot(){
+  local start=$(date +%s)
+  send_tg "🔄 开始创建系统快照\n主机: $(hostname)\n时间: $(date '+%F %T')\n保存目录: $BACKUP_DIR"
+  log_info "开始创建系统快照..."
+  check_disk_space || return 1
+
+  local compress="gzip"; command -v pigz >/dev/null && { compress="pigz"; log_info "使用 pigz 多线程压缩"; }
+  cd / && tar -cf - \
+    --exclude="dev/*" --exclude="proc/*" --exclude="sys/*" --exclude="tmp/*" \
+    --exclude="run/*" --exclude="mnt/*" --exclude="media/*" --exclude="lost+found" \
+    --exclude="var/cache/*" --exclude="var/tmp/*" --exclude="var/log/*" \
+    --exclude="var/lib/apt/lists/*" --exclude="var/lib/docker/*" \
+    --exclude="$BACKUP_DIR/*" --exclude="*.log" --exclude="*.tmp" \
+    --exclude="swap*" --exclude="core" --exclude=".cache/*" \
+    --warning=no-file-changed \
+    etc usr var root home opt 2>/tmp/snapshot_error.log | $compress > "$SNAPSHOT_FILE"
+
+  if [ ! -s "$SNAPSHOT_FILE" ]; then local err=$(cat /tmp/snapshot_error.log 2>/dev/null || echo "未知错误")
+    log_error "快照创建失败: $err"; send_tg "❌ 快照创建失败\n错误: $err\n时间: $(date '+%F %T')"; return 1; fi
+
+  local end=$(date +%s) dur=$((end-start)) size=$(du -h "$SNAPSHOT_FILE" | cut -f1)
+  log_info "快照创建成功: $SNAPSHOT_FILE ($size, 耗时: ${dur}s)"
+  send_tg "📸 快照创建成功\n文件: $(basename "$SNAPSHOT_FILE")\n大小: $size\n耗时: ${dur}s"
+}
+
+cleanup_local(){ log_info "清理本地旧快照..."; find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | sort -r | tail -n +$((LOCAL_SNAPSHOT_KEEP+1)) | xargs -r rm -f; }
+
+upload_snapshot(){
+  local SNAP_BYTES=$(du -b "$SNAPSHOT_FILE" | cut -f1)
+  local SNAP_HUMAN=$(du -h "$SNAPSHOT_FILE" | cut -f1)
+  local SNAP_NAME=$(basename "$SNAPSHOT_FILE")
+  local BASE_DIR=$(pick_base_dir)
+  local FULL_REMOTE_PATH="$BASE_DIR/$REMOTE_DIR_NAME"
+
+  send_tg "⬆️ 开始上传到远程\n服务器: $TARGET_USER@$TARGET_IP:$SSH_PORT\n目标目录: $FULL_REMOTE_PATH/system_snapshots\n文件: $SNAP_NAME\n大小: $SNAP_HUMAN"
+
+  if ! retry_command "ssh_cmd '$TARGET_USER@$TARGET_IP' 'echo ok' >/dev/null"; then
+    log_error "无法连接到远程服务器"; send_tg "⚠️ 远程上传失败\n原因: 无法连接 $TARGET_USER@$TARGET_IP:$SSH_PORT"; return 1; fi
+
+  remote_mkdir "$FULL_REMOTE_PATH/system_snapshots"
+
+  local FREE_BEFORE="$(remote_free_bytes "$BASE_DIR")"
+  local NEED=$((SNAP_BYTES + 200*1024*1024))
+  if [ -n "$FREE_BEFORE" ] && [ "$FREE_BEFORE" -lt "$NEED" ]; then
+    log_error "远端空间不足：需要 $(format_bytes $NEED)，可用 $(format_bytes $FREE_BEFORE)"
+    send_tg "❌ 空间不足，取消上传\n需要: $(format_bytes $NEED)\n可用: $(format_bytes $FREE_BEFORE)\n目录: $BASE_DIR"
     return 1
+  fi
+
+  local start=$(date +%s) used=""; local ok=0
+  if ssh_cmd "$TARGET_USER@$TARGET_IP" "command -v rsync >/dev/null 2>&1"; then
+    if retry_command "rsync -avz --info=stats2,progress2 --timeout=300 -e \"ssh -i '$SSH_KEY' -p '$SSH_PORT' $SSH_OPTS\" \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then ok=1; used="rsync"; fi
+  fi
+  if [ "$ok" -ne 1 ]; then
+    used="scp"
+    retry_command "scp -i '$SSH_KEY' -P '$SSH_PORT' -o IdentitiesOnly=yes \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\"" || { send_tg "❌ 远程上传失败（rsync→scp 均失败）\n文件: $SNAP_NAME"; return 1; }
+  fi
+
+  local end=$(date +%s) dur=$((end-start))
+  local spd="N/A"; [ "$dur" -gt 0 ] && spd="$(format_bytes $((SNAP_BYTES/dur)))/s"
+  local FREE_AFTER="$(remote_free_bytes "$BASE_DIR")"
+
+  log_info "快照上传成功 (用时: ${dur}s, 速度: ${spd}, 方式: ${used})"
+  send_tg "✅ 上传成功（${used}）\n文件: $SNAP_NAME\n用时: ${dur}s\n平均速度: ${spd}\n目标: $FULL_REMOTE_PATH/system_snapshots\n上传后可用: $(format_bytes ${FREE_AFTER:-0})"
+
+  # BusyBox 兼容清理（删除超过保留天数的快照）
+  ssh_cmd "$TARGET_USER@$TARGET_IP" "find '$FULL_REMOTE_PATH/system_snapshots' -type f -name '*.tar.gz' -mtime +$REMOTE_SNAPSHOT_DAYS -exec rm -f {} \;"
+  send_tg "🧹 已执行远程清理（>$REMOTE_SNAPSHOT_DAYS 天）\n目录: $FULL_REMOTE_PATH/system_snapshots"
 }
 
-# 字节格式化
-format_bytes() {
-    local bytes="$1"
-    if [ -z "$bytes" ]; then echo "0B"; return; fi
-    if [[ "$bytes" =~ [eE] ]]; then
-        bytes=$(echo "$bytes" | awk '{printf "%.0f", $1}' 2>/dev/null || echo "0")
-    fi
-    if ! [[ "$bytes" =~ ^[0-9]+$ ]] || [ "$bytes" -eq 0 ]; then echo "0B"; return; fi
-    if [ "$bytes" -ge 1073741824 ]; then
-        local gb=$((bytes / 1073741824)); local decimal=$(((bytes % 1073741824) * 10 / 1073741824))
-        echo "${gb}.${decimal}GB"
-    elif [ "$bytes" -ge 1048576 ]; then
-        local mb=$((bytes / 1048576)); local decimal=$(((bytes % 1048576) * 10 / 1048576))
-        echo "${mb}.${decimal}MB"
-    elif [ "$bytes" -ge 1024 ]; then
-        local kb=$((bytes / 1024)); local decimal=$(((bytes % 1024) * 10 / 1024))
-        echo "${kb}.${decimal}KB"
-    else
-        echo "${bytes}B"
-    fi
-}
-
-# 磁盘空间检查
-check_disk_space() {
-    local disk_info
-    disk_info=$(df "$BACKUP_DIR" 2>/dev/null | tail -n 1)
-    if [ -z "$disk_info" ]; then log_error "无法获取磁盘信息"; return 1; fi
-    local disk_usage
-    disk_usage=$(echo "$disk_info" | awk '{print $5}' | sed 's/%//')
-    if ! [[ "$disk_usage" =~ ^[0-9]+$ ]]; then log_error "无法解析磁盘使用率"; return 1; fi
-    if [ "$disk_usage" -gt "${DISK_SPACE_THRESHOLD:-85}" ]; then
-        log_error "磁盘空间不足: ${disk_usage}% > ${DISK_SPACE_THRESHOLD}%"
-        send_tg "❌ 备份失败（空间不足）\n磁盘使用率: ${disk_usage}% > ${DISK_SPACE_THRESHOLD}%\n时间: $(date '+%F %T')"
-        return 1
-    fi
-}
-
-# 创建快照
-create_snapshot() {
-    local start_time=$(date +%s)
-    send_tg "🔄 开始创建系统快照\n主机: $(hostname)\n时间: $(date '+%F %T')\n保存目录: $BACKUP_DIR"
-    log_info "开始创建系统快照..."
-    check_disk_space || return 1
-    
-    local compress_cmd="gzip"
-    if command -v pigz >/dev/null; then compress_cmd="pigz"; log_info "使用 pigz 多线程压缩"; fi
-    
-    cd / && tar -cf - \
-        --exclude="dev/*" --exclude="proc/*" --exclude="sys/*" --exclude="tmp/*" \
-        --exclude="run/*" --exclude="mnt/*" --exclude="media/*" --exclude="lost+found" \
-        --exclude="var/cache/*" --exclude="var/tmp/*" --exclude="var/log/*" \
-        --exclude="var/lib/apt/lists/*" --exclude="var/lib/docker/*" \
-        --exclude="$BACKUP_DIR/*" --exclude="*.log" --exclude="*.tmp" \
-        --exclude="swap*" --exclude="core" --exclude=".cache/*" \
-        --warning=no-file-changed \
-        etc usr var root home opt 2>/tmp/snapshot_error.log | $compress_cmd > "$SNAPSHOT_FILE"
-    
-    if [ ! -s "$SNAPSHOT_FILE" ]; then
-        local error_msg=$(cat /tmp/snapshot_error.log 2>/dev/null || echo "未知错误")
-        log_error "快照创建失败: $error_msg"
-        send_tg "❌ 快照创建失败\n错误: $error_msg\n时间: $(date '+%F %T')"
-        return 1
-    fi
-    
-    local end_time=$(date +%s)
-    local duration=$((end_time - start_time))
-    local snapshot_size=$(du -h "$SNAPSHOT_FILE" | cut -f1)
-    log_info "快照创建成功: $SNAPSHOT_FILE ($snapshot_size, 耗时: ${duration}s)"
-    send_tg "📸 快照创建成功\n文件: $(basename "$SNAPSHOT_FILE")\n大小: $snapshot_size\n耗时: ${duration}s\n时间: $(date '+%F %T')"
-}
-
-# 清理本地旧快照
-cleanup_local() {
-    log_info "清理本地旧快照..."
-    find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | sort -r | tail -n +$((LOCAL_SNAPSHOT_KEEP+1)) | xargs -r rm -f
-}
-
-# 上传到远程（带 rsync→scp 回退 & BusyBox 清理）
-upload_snapshot() {
-    log_info "开始上传快照到远程服务器..."
-    send_tg "⬆️ 开始上传到远程\n服务器: $TARGET_USER@$TARGET_IP:$SSH_PORT\n目录: $FULL_REMOTE_PATH/system_snapshots"
-    if ! retry_command "ssh_cmd '$TARGET_USER@$TARGET_IP' 'echo 连接测试' >/dev/null"; then
-        log_error "无法连接到远程服务器"
-        send_tg "⚠️ 远程上传失败\n原因: 无法通过 SSH 连接到远程 $TARGET_USER@$TARGET_IP:$SSH_PORT"
-        return 1
-    fi
-    
-    # 确保远程目录存在
-    ssh_cmd "$TARGET_USER@$TARGET_IP" "mkdir -p '$FULL_REMOTE_PATH/system_snapshots'"
-
-    local upload_start_time=$(date +%s)
-    local snapshot_size_bytes=$(du -b "$SNAPSHOT_FILE" | cut -f1)
-    local used_method=""
-
-    # 判断远端是否有 rsync（若无则回退到 scp）
-    if ssh_cmd "$TARGET_USER@$TARGET_IP" "command -v rsync >/dev/null 2>&1"; then
-        if retry_command "rsync -avz --timeout=300 -e \"ssh -i '$SSH_KEY' -p '$SSH_PORT' $SSH_OPTS\" \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
-            used_method="rsync"
-        else
-            log_error "rsync 失败，尝试使用 scp 回退"
-            used_method="scp"
-            if ! retry_command "scp -i '$SSH_KEY' -P '$SSH_PORT' -o IdentitiesOnly=yes \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
-                send_tg "❌ 远程上传失败（rsync→scp 均失败）\n文件: $(basename "$SNAPSHOT_FILE")"
-                return 1
-            fi
-        fi
-    else
-        used_method="scp"
-        if ! retry_command "scp -i '$SSH_KEY' -P '$SSH_PORT' -o IdentitiesOnly=yes \"$SNAPSHOT_FILE\" \"$TARGET_USER@$TARGET_IP:$FULL_REMOTE_PATH/system_snapshots/\""; then
-            send_tg "❌ 远程上传失败（scp）\n文件: $(basename "$SNAPSHOT_FILE")"
-            return 1
-        fi
-    fi
-
-    local upload_end_time=$(date +%s)
-    local upload_duration=$((upload_end_time - upload_start_time))
-    local upload_speed="N/A"
-    if [ "$upload_duration" -gt 0 ]; then
-        local upload_speed_bps=$((snapshot_size_bytes / upload_duration))
-        upload_speed="$(format_bytes $upload_speed_bps)/s"
-    fi
-    
-    log_info "快照上传成功 (用时: ${upload_duration}s, 速度: ${upload_speed}, 方式: ${used_method})"
-    send_tg "✅ 上传成功（${used_method}）\n文件: $(basename "$SNAPSHOT_FILE")\n用时: ${upload_duration}s\n速度: ${upload_speed}\n远程目录: $FULL_REMOTE_PATH/system_snapshots"
-
-    # BusyBox 兼容的远程清理：用 -exec rm -f 代替 -delete
-    ssh_cmd "$TARGET_USER@$TARGET_IP" "find '$FULL_REMOTE_PATH/system_snapshots' -type f -name '*.tar.gz' -mtime +$REMOTE_SNAPSHOT_DAYS -exec rm -f {} \;"
-    send_tg "🧹 已执行远程清理（>$REMOTE_SNAPSHOT_DAYS 天）\n目录: $FULL_REMOTE_PATH/system_snapshots"
-}
-
-# systemd定时器设置
-setup_systemd_timer() {
-    local service_file="/etc/systemd/system/system-snapshot.service"
-    local timer_file="/etc/systemd/system/system-snapshot.timer"
-    
-    if [ -f "$timer_file" ]; then
-        systemctl stop system-snapshot.timer 2>/dev/null || true
-    fi
-
-    cat > "$service_file" << EOFSERVICE
+setup_systemd_timer(){
+  local svc="/etc/systemd/system/system-snapshot.service"
+  local tim="/etc/systemd/system/system-snapshot.timer"
+  [ -f "$tim" ] && systemctl stop system-snapshot.timer 2>/dev/null || true
+  cat > "$svc" << EOFS
 [Unit]
 Description=System Snapshot Backup Service
 After=network.target
@@ -573,9 +362,8 @@ Environment="SYSTEMD_TIMER=1"
 WorkingDirectory=/root
 [Install]
 WantedBy=multi-user.target
-EOFSERVICE
-    
-    cat > "$timer_file" << EOFTIMER
+EOFS
+  cat > "$tim" << EOFT
 [Unit]
 Description=Run System Snapshot Every $BACKUP_INTERVAL_DAYS Days
 [Timer]
@@ -585,65 +373,52 @@ RandomizedDelaySec=2h
 Persistent=true
 [Install]
 WantedBy=timers.target
-EOFTIMER
-    
-    systemctl daemon-reload
-    systemctl enable system-snapshot.timer
-    systemctl start system-snapshot.timer
-    
-    local current_time=$(date +%s)
-    local next_run_time=$((current_time + 3600))  # 当前时间 + 1小时
-    local next_run_cst=$(date -d "@$next_run_time" '+%Y年%m月%d日 %H:%M (CST)')
-    
-    log_info "定时器已设置: 1小时后首次运行，之后每${BACKUP_INTERVAL_DAYS}天执行一次"
-    log_info "计算得出的下次运行时间: $next_run_cst"
-    send_tg "⏰ 定时任务更新\n首次: 1小时后\n频率: 每${BACKUP_INTERVAL_DAYS}天\n下次运行: $next_run_cst"
+EOFT
+  systemctl daemon-reload
+  systemctl enable system-snapshot.timer
+  systemctl start system-snapshot.timer
+  local next=$(date -d "@$(( $(date +%s)+3600 ))" '+%Y年%m月%d日 %H:%M (CST)')
+  log_info "定时器已设置: 1小时后首次运行，之后每${BACKUP_INTERVAL_DAYS}天执行一次"
+  log_info "计算得出的下次运行时间: $next"
+  send_tg "⏰ 定时任务更新\n首次: 1小时后\n频率: 每${BACKUP_INTERVAL_DAYS}天\n下次运行: $next"
 }
 
-# 主执行流程
-if [ -z "$SYSTEMD_TIMER" ]; then
-    setup_systemd_timer
-fi
-
+[ -z "$SYSTEMD_TIMER" ] && setup_systemd_timer
 create_snapshot && cleanup_local && upload_snapshot
-
 log_info "系统快照操作全部完成"
 
-# 汇总统计 & TG 完成通知
 TOTAL_LOCAL_SNAPSHOTS=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | wc -l)
-TOTAL_LOCAL_SIZE_BYTES=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" -exec du -b {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+TOTAL_LOCAL_SIZE_BYTES=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" -exec du -b {} + 2>/dev/null | awk '{s+=$1} END{print s+0}')
 TOTAL_LOCAL_SIZE=$(format_bytes "${TOTAL_LOCAL_SIZE_BYTES:-0}")
 log_info "本地快照数量: ${TOTAL_LOCAL_SNAPSHOTS} 个, 总大小: ${TOTAL_LOCAL_SIZE}"
 send_tg "✅ 任务完成 | $(hostname)\n本地快照: ${TOTAL_LOCAL_SNAPSHOTS} 个\n本地总大小: ${TOTAL_LOCAL_SIZE}\n时间: $(date '+%F %T')"
 EOF
 
-    chmod +x "$SCRIPT_FILE"
-    chmod 600 "$CONFIG_FILE"
-    log "${GREEN}✓ 脚本创建完成！${NC}\n"
+  chmod +x "$SCRIPT_FILE"
+  chmod 600 "$CONFIG_FILE"
+  log "${GREEN}✓ 脚本创建完成！${NC}\n"
 }
 
-# 主流程
-main() {
-    clear
-    show_title "系统快照备份工具安装向导"
-    check_requirements
-    collect_config
-    setup_ssh_key
-    test_telegram
-    create_script
-    if [[ "$RUN_NOW" =~ ^[Yy]$ ]]; then
-        log "${YELLOW}正在执行首次测试运行...${NC}"
-        bash "$SCRIPT_FILE"
-    fi
-    show_title "安装完成"
-    log "${GREEN}✓ 系统快照备份工具安装成功！${NC}\n"
-    log "${CYAN}配置文件位置:${NC} $CONFIG_FILE"
-    log "${CYAN}主脚本位置:${NC} $SCRIPT_FILE\n"
-    log "${YELLOW}管理定时任务: ${NC}"
-    log "  - 查看状态: ${CYAN}systemctl status system-snapshot.timer${NC}"
-    log "  - 立即运行: ${CYAN}systemctl start system-snapshot.service${NC}"
-    log "  - 停止/禁用: ${CYAN}systemctl disable system-snapshot.timer${NC}\n"
+main(){
+  clear
+  show_title "系统快照备份工具安装向导"
+  check_requirements
+  collect_config
+  setup_ssh_key
+  test_telegram
+  create_script
+  if [[ "$RUN_NOW" =~ ^[Yy]$ ]]; then
+    log "${YELLOW}正在执行首次测试运行...${NC}"
+    bash "$SCRIPT_FILE"
+  fi
+  show_title "安装完成"
+  log "${GREEN}✓ 系统快照备份工具安装成功！${NC}\n"
+  log "${CYAN}配置文件位置:${NC} $CONFIG_FILE"
+  log "${CYAN}主脚本位置:${NC} $SCRIPT_FILE\n"
+  log "${YELLOW}管理定时任务:${NC}"
+  log "  - 查看状态: ${CYAN}systemctl status system-snapshot.timer${NC}"
+  log "  - 立即运行: ${CYAN}systemctl start system-snapshot.service${NC}"
+  log "  - 停止/禁用: ${CYAN}systemctl disable system-snapshot.timer${NC}\n"
 }
 
-# 运行主程序
 main
