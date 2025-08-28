@@ -1,291 +1,258 @@
 #!/bin/bash
+# 系统快照恢复工具 - 适配 v2.4 备份脚本
+# - 远程默认路径：/mnt/wd/Remote_backup
+# - 统一 SSH 参数（强制公钥，端口可配）
+# - 配置缺失时交互式输入
 
-# 系统快照恢复工具 - 完全适配v2.0备份脚本
-# 核心功能版本
+set -euo pipefail
 
-# 权限检查
+# ---------- 权限与颜色 ----------
 if [ "$EUID" -ne 0 ]; then
-    echo "错误: 请使用root权限运行此脚本"
-    exit 1
+  echo "错误: 请使用 root 权限运行此脚本"
+  exit 1
 fi
 
-# 颜色设置
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# 路径定义 (与备份脚本完全一致)
+# ---------- 路径 ----------
 CONFIG_FILE="/etc/system_snapshot/config.conf"
 LOG_DIR="/var/log/system_snapshot"
 RESTORE_LOG_FILE="$LOG_DIR/restore.log"
 
-# 日志函数
-log() {
-    mkdir -p "$LOG_DIR"
-    echo -e "$1" | tee -a "$RESTORE_LOG_FILE"
+# ---------- 日志 ----------
+log(){ mkdir -p "$LOG_DIR"; echo -e "$1" | tee -a "$RESTORE_LOG_FILE"; }
+
+# ---------- 默认/回退 ----------
+DEFAULT_TARGET_BASE_DIR="/mnt/wd/Remote_backup"
+DEFAULT_BACKUP_DIR="/backups"
+DEFAULT_SSH_PORT="22"
+DEFAULT_TARGET_USER="root"
+
+# ---------- SSH 统一参数（与备份脚本一致） ----------
+SSH_KEY="/root/.ssh/id_ed25519"
+SSH_OPTS='-o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts'
+
+ssh_cmd(){  # ssh_cmd user@host "cmd..."
+  local host="$1"; shift
+  eval ssh -i "\"$SSH_KEY\"" -p "\"$SSH_PORT\"" $SSH_OPTS "\"$host\"" "\"$@\""
+}
+scp_cmd(){  # scp_cmd src dst
+  eval scp -i "\"$SSH_KEY\"" -P "\"$SSH_PORT\"" -o IdentitiesOnly=yes "\"$@\""
 }
 
-# 加载配置文件
-log "${CYAN}正在加载备份工具配置文件...${NC}"
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-    log "${GREEN}✓ 配置文件加载成功！${NC}"
-    # 构建完整远程路径
-    FULL_REMOTE_PATH="$TARGET_BASE_DIR/$REMOTE_DIR_NAME"
-else
-    log "${YELLOW}警告: 未找到备份配置文件，请先运行备份脚本进行初始化${NC}"
-    BACKUP_DIR="/backups"
-fi
-
-# 标题
+# ---------- 加载配置 ----------
 clear
 echo -e "${BLUE}================================================${NC}"
-echo -e "${BLUE}        系统快照恢复工具 v2.0 (核心版)          ${NC}"
-echo -e "${BLUE}================================================${NC}"
-echo ""
+echo -e "${BLUE}        系统快照恢复工具 v2.4（本地端）        ${NC}"
+echo -e "${BLUE}================================================${NC}\n"
 
-# 选择恢复方式
-echo -e "${CYAN}请选择恢复方式:${NC}"
-echo -e "1) ${GREEN}本地恢复${NC} - 从本地备份目录恢复"
-echo -e "2) ${GREEN}远程恢复${NC} - 从远程服务器下载并恢复"
-echo ""
-read -p "请选择 [1-2]: " RESTORE_TYPE
+log "${CYAN}正在加载备份工具配置文件...${NC}"
+if [ -f "$CONFIG_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  log "${GREEN}✓ 配置文件加载成功！${NC}"
 
-if ! [[ "$RESTORE_TYPE" =~ ^[1-2]$ ]]; then
-    log "${RED}错误: 无效选择${NC}"
-    exit 1
+  # 远端路径：若配置文件未设置 TARGET_BASE_DIR，则默认 /mnt/wd/Remote_backup
+  TARGET_BASE_DIR="${TARGET_BASE_DIR:-$DEFAULT_TARGET_BASE_DIR}"
+  REMOTE_DIR_NAME="${REMOTE_DIR_NAME:-$(hostname)}"
+  TARGET_USER="${TARGET_USER:-$DEFAULT_TARGET_USER}"
+  SSH_PORT="${SSH_PORT:-$DEFAULT_SSH_PORT}"
+
+  FULL_REMOTE_PATH="$TARGET_BASE_DIR/$REMOTE_DIR_NAME"
+  BACKUP_DIR="${BACKUP_DIR:-$DEFAULT_BACKUP_DIR}"
+else
+  log "${YELLOW}⚠ 未找到 $CONFIG_FILE，将使用交互式输入并采用默认路径${NC}"
+  read -rp "远程服务器 IP: " TARGET_IP
+  read -rp "SSH 端口 [默认 $DEFAULT_SSH_PORT]: " _port
+  SSH_PORT="${_port:-$DEFAULT_SSH_PORT}"
+  read -rp "远程用户名 [默认 $DEFAULT_TARGET_USER]: " _user
+  TARGET_USER="${_user:-$DEFAULT_TARGET_USER}"
+  read -rp "远程目录名（默认使用当前主机名 $(hostname) ）: " _rname
+  REMOTE_DIR_NAME="${_rname:-$(hostname)}"
+
+  TARGET_BASE_DIR="$DEFAULT_TARGET_BASE_DIR"
+  FULL_REMOTE_PATH="$TARGET_BASE_DIR/$REMOTE_DIR_NAME"
+  BACKUP_DIR="$DEFAULT_BACKUP_DIR"
 fi
 
-# 本地恢复
-local_restore() {
-    echo -e "\n${BLUE}=== 本地恢复模式 ===${NC}"
-    
-    if [ ! -d "$BACKUP_DIR" ]; then
-        log "${RED}错误: 备份目录不存在 - $BACKUP_DIR${NC}"
-        exit 1
-    fi
+# ---------- 选择恢复方式 ----------
+echo -e "${CYAN}请选择恢复方式:${NC}"
+echo -e "1) ${GREEN}本地恢复${NC} - 从本地目录 $BACKUP_DIR"
+echo -e "2) ${GREEN}远程恢复${NC} - 从 ${TARGET_USER}@${TARGET_IP:-?}:$SSH_PORT 的 $FULL_REMOTE_PATH/system_snapshots 下载"
+echo ""
+read -rp "请选择 [1-2]: " RESTORE_TYPE
+[[ "$RESTORE_TYPE" =~ ^[12]$ ]] || { log "${RED}错误: 无效选择${NC}"; exit 1; }
 
-    # 查找快照文件
-    SNAPSHOT_FILES=($(find "$BACKUP_DIR" -name "system_snapshot_*.tar.gz" | sort -r))
-    
-    if [ ${#SNAPSHOT_FILES[@]} -eq 0 ]; then
-        log "${RED}错误: 未找到快照文件${NC}"
-        exit 1
-    fi
+# ---------- 本地恢复 ----------
+local_restore(){
+  echo -e "\n${BLUE}=== 本地恢复模式 ===${NC}"
+  if [ ! -d "$BACKUP_DIR" ]; then
+    log "${RED}错误: 备份目录不存在 - $BACKUP_DIR${NC}"
+    exit 1
+  fi
 
-    # 显示可用快照
-    echo -e "${YELLOW}可用快照:${NC}"
-    for i in "${!SNAPSHOT_FILES[@]}"; do
-        SNAPSHOT_NAME=$(basename "${SNAPSHOT_FILES[$i]}")
-        SNAPSHOT_SIZE=$(du -h "${SNAPSHOT_FILES[$i]}" | cut -f1)
-        SNAPSHOT_DATE=$(date -r "${SNAPSHOT_FILES[$i]}" "+%Y-%m-%d %H:%M")
-        echo -e "$((i+1))) ${GREEN}$SNAPSHOT_NAME${NC} ($SNAPSHOT_SIZE, $SNAPSHOT_DATE)"
-    done
+  mapfile -t SNAPSHOT_FILES < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" -printf "%T@ %p\n" | sort -nr | awk '{print $2}')
+  if [ "${#SNAPSHOT_FILES[@]}" -eq 0 ]; then
+    log "${RED}错误: 未找到快照文件${NC}"; exit 1
+  fi
 
-    read -p "选择快照编号 [1-${#SNAPSHOT_FILES[@]}]: " CHOICE
-    
-    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt ${#SNAPSHOT_FILES[@]} ]; then
-        log "${RED}错误: 无效选择${NC}"
-        exit 1
-    fi
+  echo -e "${YELLOW}可用快照（按时间新→旧）：${NC}"
+  for i in "${!SNAPSHOT_FILES[@]}"; do
+    f="${SNAPSHOT_FILES[$i]}"
+    echo -e "$((i+1))) ${GREEN}$(basename "$f")${NC} ($(du -h "$f" | cut -f1), $(date -r "$f" "+%Y-%m-%d %H:%M"))"
+  done
+  read -rp "选择快照编号 [1-${#SNAPSHOT_FILES[@]}]: " CHOICE
+  [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "${#SNAPSHOT_FILES[@]}" ] || { log "${RED}错误: 无效选择${NC}"; exit 1; }
 
-    LOCAL_SNAPSHOT="${SNAPSHOT_FILES[$((CHOICE-1))]}"
-    SNAPSHOT_NAME=$(basename "$LOCAL_SNAPSHOT")
-    
-    log "${YELLOW}选择的快照: $SNAPSHOT_NAME${NC}"
+  LOCAL_SNAPSHOT="${SNAPSHOT_FILES[$((CHOICE-1))]}"
+  SNAPSHOT_NAME="$(basename "$LOCAL_SNAPSHOT")"
+  log "${YELLOW}选择的快照: $SNAPSHOT_NAME${NC}"
 }
 
-# 远程恢复
-remote_restore() {
-    echo -e "\n${BLUE}=== 远程恢复模式 ===${NC}"
-    
-    # 检查SSH工具
-    if ! command -v ssh &> /dev/null || ! command -v scp &> /dev/null; then
-        log "${RED}错误: 缺少SSH工具${NC}"
-        exit 1
-    fi
+# ---------- 远程恢复 ----------
+remote_restore(){
+  echo -e "\n${BLUE}=== 远程恢复模式 ===${NC}"
+  command -v ssh >/dev/null || { log "${RED}错误: 缺少 ssh${NC}"; exit 1; }
+  command -v scp >/dev/null || { log "${RED}错误: 缺少 scp${NC}"; exit 1; }
+  if [ -z "${TARGET_IP:-}" ]; then
+    log "${RED}错误: 缺少远程服务器 IP${NC}"; exit 1
+  fi
 
-    # 使用配置文件中的连接信息
-    if [ -n "$TARGET_IP" ]; then
-        log "${CYAN}使用配置文件连接信息:${NC}"
-        log "服务器: $TARGET_USER@$TARGET_IP:$SSH_PORT"
-        log "远程路径: $FULL_REMOTE_PATH"
-    else
-        log "${RED}错误: 配置文件中缺少远程服务器信息${NC}"
-        exit 1
-    fi
+  log "${CYAN}连接信息:${NC} $TARGET_USER@$TARGET_IP:$SSH_PORT"
+  log "${CYAN}远程路径:${NC} $FULL_REMOTE_PATH/system_snapshots"
 
-    # SSH连接测试 (优先使用密钥)
-    if [ -f "/root/.ssh/id_ed25519" ]; then
-        SSH_CMD="ssh -i /root/.ssh/id_ed25519 -p $SSH_PORT $TARGET_USER@$TARGET_IP"
-        SCP_CMD="scp -i /root/.ssh/id_ed25519 -P $SSH_PORT"
-    else
-        read -s -p "SSH密码: " SSH_PASS
-        echo ""
-        if ! command -v sshpass &> /dev/null; then
-            apt-get update && apt-get install -y sshpass
-        fi
-        SSH_CMD="sshpass -p '$SSH_PASS' ssh -p $SSH_PORT $TARGET_USER@$TARGET_IP"
-        SCP_CMD="sshpass -p '$SSH_PASS' scp -P $SSH_PORT"
-    fi
+  # 优先用密钥；否则允许密码（sshpass）
+  if [ ! -f "$SSH_KEY" ]; then
+    read -rsp "未找到 $SSH_KEY，输入 SSH 密码（回车确认）: " SSH_PASS; echo
+    command -v sshpass >/dev/null 2>&1 || (apt-get update && apt-get install -y sshpass)
+    SSH_CMD="sshpass -p '$SSH_PASS' ssh -p $SSH_PORT"
+    SCP_CMD="sshpass -p '$SSH_PASS' scp -P $SSH_PORT"
+  else
+    SSH_CMD="ssh -i $SSH_KEY -p $SSH_PORT $SSH_OPTS"
+    SCP_CMD="scp -i $SSH_KEY -P $SSH_PORT -o IdentitiesOnly=yes"
+  fi
 
-    # 测试连接
-    if ! eval "$SSH_CMD 'echo 连接测试'" &>/dev/null; then
-        log "${RED}错误: 无法连接远程服务器${NC}"
-        exit 1
-    fi
-    log "${GREEN}✓ 远程连接成功${NC}"
+  # 测试连接
+  if ! eval "$SSH_CMD $TARGET_USER@$TARGET_IP 'echo ok'" >/dev/null 2>&1; then
+    log "${RED}错误: 无法连接远程服务器${NC}"; exit 1
+  fi
+  log "${GREEN}✓ 远程连接成功${NC}"
 
-    # 获取远程快照列表
-    SNAPSHOT_LIST=$(eval "$SSH_CMD 'find $FULL_REMOTE_PATH/system_snapshots -name \"*.tar.gz\" | sort -r'")
-    
-    if [ -z "$SNAPSHOT_LIST" ]; then
-        log "${RED}错误: 远程未找到快照文件${NC}"
-        exit 1
-    fi
+  # 列出远程快照（时间新→旧）
+  SNAPSHOT_LIST=$(eval "$SSH_CMD $TARGET_USER@$TARGET_IP 'find \"$FULL_REMOTE_PATH/system_snapshots\" -type f -name \"system_snapshot_*.tar.gz\" -printf \"%T@ %p\n\" 2>/dev/null | sort -nr | awk '{print \$2}''")
+  if [ -z "$SNAPSHOT_LIST" ]; then
+    log "${RED}错误: 远程未找到快照文件${NC}"; exit 1
+  fi
 
-    # 显示远程快照
-    echo -e "${YELLOW}远程可用快照:${NC}"
-    IFS=$'\n' SNAPSHOT_FILES=($SNAPSHOT_LIST)
-    
-    for i in "${!SNAPSHOT_FILES[@]}"; do
-        SNAPSHOT_NAME=$(basename "${SNAPSHOT_FILES[$i]}")
-        SNAPSHOT_INFO=$(eval "$SSH_CMD 'ls -lh \"${SNAPSHOT_FILES[$i]}\"'" 2>/dev/null)
-        SNAPSHOT_SIZE=$(echo "$SNAPSHOT_INFO" | awk '{print $5}')
-        SNAPSHOT_DATE=$(echo "$SNAPSHOT_INFO" | awk '{print $6" "$7" "$8}')
-        echo -e "$((i+1))) ${GREEN}$SNAPSHOT_NAME${NC} ($SNAPSHOT_SIZE, $SNAPSHOT_DATE)"
-    done
+  IFS=$'\n' read -r -d '' -a SNAPSHOT_FILES < <(printf "%s\0" $SNAPSHOT_LIST && printf '\0')
+  echo -e "${YELLOW}远程可用快照（按时间新→旧）：${NC}"
+  for i in "${!SNAPSHOT_FILES[@]}"; do
+    f="${SNAPSHOT_FILES[$i]}"
+    info=$(eval "$SSH_CMD $TARGET_USER@$TARGET_IP 'ls -lh --time-style=+%Y-%m-%d\\ %H:%M \"$f\"' 2>/dev/null" || true)
+    size=$(echo "$info" | awk '{print $5}')
+    dt=$(echo "$info" | awk '{print $(NF-1),$NF}')
+    echo -e "$((i+1))) ${GREEN}$(basename "$f")${NC} (${size:-?}, ${dt:-?})"
+  done
 
-    read -p "选择快照编号 [1-${#SNAPSHOT_FILES[@]}]: " CHOICE
-    
-    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt ${#SNAPSHOT_FILES[@]} ]; then
-        log "${RED}错误: 无效选择${NC}"
-        exit 1
-    fi
+  read -rp "选择快照编号 [1-${#SNAPSHOT_FILES[@]}]: " CHOICE
+  [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "${#SNAPSHOT_FILES[@]}" ] || { log "${RED}错误: 无效选择${NC}"; exit 1; }
 
-    SELECTED_SNAPSHOT="${SNAPSHOT_FILES[$((CHOICE-1))]}"
-    SNAPSHOT_NAME=$(basename "$SELECTED_SNAPSHOT")
+  SELECTED_SNAPSHOT="${SNAPSHOT_FILES[$((CHOICE-1))]}"
+  SNAPSHOT_NAME="$(basename "$SELECTED_SNAPSHOT")"
 
-    # 下载快照
-    LOCAL_TEMP_DIR="/tmp/restore_$$"
-    mkdir -p "$LOCAL_TEMP_DIR"
-    LOCAL_SNAPSHOT="$LOCAL_TEMP_DIR/$SNAPSHOT_NAME"
+  # 下载到临时目录
+  LOCAL_TEMP_DIR="/tmp/restore_$$"
+  mkdir -p "$LOCAL_TEMP_DIR"
+  LOCAL_SNAPSHOT="$LOCAL_TEMP_DIR/$SNAPSHOT_NAME"
 
-    log "${YELLOW}正在下载快照...${NC}"
-    if ! eval "$SCP_CMD $TARGET_USER@$TARGET_IP:\"$SELECTED_SNAPSHOT\" \"$LOCAL_SNAPSHOT\""; then
-        log "${RED}错误: 下载失败${NC}"
-        rm -rf "$LOCAL_TEMP_DIR"
-        exit 1
-    fi
-    log "${GREEN}✓ 下载完成${NC}"
+  log "${YELLOW}正在下载快照...${NC}"
+  if ! eval "$SCP_CMD $TARGET_USER@$TARGET_IP:\"$SELECTED_SNAPSHOT\" \"$LOCAL_SNAPSHOT\""; then
+    log "${RED}错误: 下载失败${NC}"
+    rm -rf "$LOCAL_TEMP_DIR"; exit 1
+  fi
+  log "${GREEN}✓ 下载完成${NC}"
 }
 
-# 执行恢复
-perform_restore() {
-    # 确认操作
-    log "\n${RED}警告: 恢复操作不可撤销，将覆盖当前系统状态${NC}"
-    read -p "确认继续？[y/N]: " CONFIRM
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-        log "${YELLOW}操作已取消${NC}"
-        exit 0
-    fi
+# ---------- 执行恢复 ----------
+perform_restore(){
+  log "\n${RED}警告: 恢复操作不可撤销，将覆盖当前系统状态${NC}"
+  read -rp "确认继续？[y/N]: " CONFIRM
+  [[ "$CONFIRM" =~ ^[Yy]$ ]] || { log "${YELLOW}操作已取消${NC}"; exit 0; }
 
-    # 恢复模式选择
-    echo -e "\n${YELLOW}恢复模式:${NC}"
-    echo "1) 标准恢复 - 保留网络配置"
-    echo "2) 完全恢复 - 恢复所有文件"
-    read -p "选择模式 [1-2]: " MODE
+  echo -e "\n${YELLOW}恢复模式:${NC}"
+  echo "1) 标准恢复 - 保留网络/SSH 等关键配置"
+  echo "2) 完全恢复 - 恢复所有文件"
+  read -rp "选择模式 [1-2]: " MODE
+  [[ "$MODE" =~ ^[12]$ ]] || { log "${RED}错误: 无效选择${NC}"; exit 1; }
 
-    if ! [[ "$MODE" =~ ^[1-2]$ ]]; then
-        log "${RED}错误: 无效选择${NC}"
-        exit 1
-    fi
+  # 备份关键配置（标准模式）
+  if [ "$MODE" -eq 1 ]; then
+    BACKUP_CONFIG_DIR="/tmp/current_config_$$"
+    mkdir -p "$BACKUP_CONFIG_DIR"
+    cp /etc/fstab "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp -r /etc/network "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp -r /etc/netplan "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp /etc/hostname "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp /etc/hosts "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp /etc/resolv.conf "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp -r /etc/ssh "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+    cp -r /root/.ssh "$BACKUP_CONFIG_DIR/" 2>/dev/null || true
+  fi
 
-    # 备份关键配置 (标准模式)
-    if [ "$MODE" -eq 1 ]; then
-        BACKUP_CONFIG_DIR="/tmp/current_config_$$"
-        mkdir -p "$BACKUP_CONFIG_DIR"
-        cp /etc/fstab "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp -r /etc/network "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp -r /etc/netplan "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp /etc/hostname "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp /etc/hosts "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp /etc/resolv.conf "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp -r /etc/ssh "$BACKUP_CONFIG_DIR/" 2>/dev/null
-        cp -r /root/.ssh "$BACKUP_CONFIG_DIR/" 2>/dev/null
-    fi
+  # 停止常见服务
+  for svc in nginx apache2 mysql docker; do systemctl stop "$svc" 2>/dev/null || true; done
 
-    # 停止服务
-    for service in nginx apache2 mysql docker; do
-        systemctl stop $service 2>/dev/null || true
-    done
+  log "${BLUE}正在恢复系统...${NC}"
+  if [ "$MODE" -eq 1 ]; then
+    tar -xzf "$LOCAL_SNAPSHOT" -C / \
+      --exclude="dev/*" --exclude="proc/*" --exclude="sys/*" \
+      --exclude="run/*" --exclude="tmp/*" \
+      --exclude="etc/fstab" --exclude="etc/hostname" --exclude="etc/hosts" \
+      --exclude="etc/network/*" --exclude="etc/netplan/*" \
+      --exclude="etc/resolv.conf" --exclude="etc/ssh/*" \
+      --exclude="root/.ssh/*" --exclude="$DEFAULT_BACKUP_DIR/*" \
+      --warning=no-unknown-keyword
+  else
+    tar -xzf "$LOCAL_SNAPSHOT" -C / \
+      --exclude="dev/*" --exclude="proc/*" --exclude="sys/*" \
+      --exclude="run/*" --exclude="tmp/*" --exclude="$DEFAULT_BACKUP_DIR/*" \
+      --warning=no-unknown-keyword
+  fi
 
-    # 执行恢复
-    log "${BLUE}正在恢复系统...${NC}"
-    
-    if [ "$MODE" -eq 1 ]; then
-        # 标准恢复
-        tar -xzf "$LOCAL_SNAPSHOT" -C / \
-            --exclude="dev/*" --exclude="proc/*" --exclude="sys/*" \
-            --exclude="run/*" --exclude="tmp/*" \
-            --exclude="etc/fstab" --exclude="etc/hostname" --exclude="etc/hosts" \
-            --exclude="etc/network/*" --exclude="etc/netplan/*" \
-            --exclude="etc/resolv.conf" --exclude="etc/ssh/*" \
-            --exclude="root/.ssh/*" --exclude="$BACKUP_DIR/*"
-    else
-        # 完全恢复
-        tar -xzf "$LOCAL_SNAPSHOT" -C / \
-            --exclude="dev/*" --exclude="proc/*" --exclude="sys/*" \
-            --exclude="run/*" --exclude="tmp/*" --exclude="$BACKUP_DIR/*"
-    fi
+  # 标准模式：还原保留项
+  if [ "$MODE" -eq 1 ]; then
+    cp "$BACKUP_CONFIG_DIR/fstab" /etc/ 2>/dev/null || true
+    cp -r "$BACKUP_CONFIG_DIR/network" /etc/ 2>/dev/null || true
+    cp -r "$BACKUP_CONFIG_DIR/netplan" /etc/ 2>/dev/null || true
+    cp "$BACKUP_CONFIG_DIR/hostname" /etc/ 2>/dev/null || true
+    cp "$BACKUP_CONFIG_DIR/hosts" /etc/ 2>/dev/null || true
+    cp "$BACKUP_CONFIG_DIR/resolv.conf" /etc/ 2>/dev/null || true
+    cp -r "$BACKUP_CONFIG_DIR/ssh" /etc/ 2>/dev/null || true
+    cp -r "$BACKUP_CONFIG_DIR/.ssh" /root/ 2>/dev/null || true
+    chmod 700 /root/.ssh 2>/dev/null || true
+    chmod 600 /root/.ssh/* 2>/dev/null || true
+    rm -rf "$BACKUP_CONFIG_DIR"
+  fi
 
-    if [ $? -ne 0 ]; then
-        log "${RED}错误: 恢复失败${NC}"
-        exit 1
-    fi
+  # 清理临时
+  if [ "${RESTORE_TYPE}" -eq 2 ] && [ -n "${LOCAL_TEMP_DIR:-}" ]; then
+    rm -rf "$LOCAL_TEMP_DIR"
+  fi
 
-    # 恢复保留的配置 (标准模式)
-    if [ "$MODE" -eq 1 ]; then
-        cp "$BACKUP_CONFIG_DIR/fstab" /etc/ 2>/dev/null
-        cp -r "$BACKUP_CONFIG_DIR/network" /etc/ 2>/dev/null
-        cp -r "$BACKUP_CONFIG_DIR/netplan" /etc/ 2>/dev/null
-        cp "$BACKUP_CONFIG_DIR/hostname" /etc/ 2>/dev/null
-        cp "$BACKUP_CONFIG_DIR/hosts" /etc/ 2>/dev/null
-        cp "$BACKUP_CONFIG_DIR/resolv.conf" /etc/ 2>/dev/null
-        cp -r "$BACKUP_CONFIG_DIR/ssh" /etc/ 2>/dev/null
-        cp -r "$BACKUP_CONFIG_DIR/.ssh" /root/ 2>/dev/null
-        chmod 700 /root/.ssh 2>/dev/null
-        chmod 600 /root/.ssh/* 2>/dev/null
-        rm -rf "$BACKUP_CONFIG_DIR"
-    fi
+  log "${GREEN}✓ 系统恢复完成！${NC}"
+  [ "$MODE" -eq 1 ] && log "${BLUE}已保留当前网络/SSH 配置${NC}"
 
-    # 清理临时文件
-    if [ "$RESTORE_TYPE" -eq 2 ] && [ -n "$LOCAL_TEMP_DIR" ]; then
-        rm -rf "$LOCAL_TEMP_DIR"
-    fi
-
-    log "${GREEN}✓ 系统恢复完成！${NC}"
-    
-    if [ "$MODE" -eq 1 ]; then
-        log "${BLUE}已保留当前网络配置${NC}"
-    fi
-
-    # 重启提示
-    log "\n${YELLOW}需要重启系统以完成恢复${NC}"
-    read -p "立即重启？[y/N]: " REBOOT
-    if [[ "$REBOOT" =~ ^[Yy]$ ]]; then
-        reboot
-    fi
+  log "\n${YELLOW}需要重启系统以完成恢复${NC}"
+  read -rp "立即重启？[y/N]: " REBOOT
+  [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
 }
 
-# 主流程
+# ---------- 主流程 ----------
 if [ "$RESTORE_TYPE" -eq 1 ]; then
-    local_restore
+  local_restore
 else
-    remote_restore
+  remote_restore
 fi
 
 perform_restore
