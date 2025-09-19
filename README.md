@@ -83,9 +83,9 @@ sudo ./remote_restore.sh
 
 ### 方法二：Git 克隆
 ```bash
-git clone https://github.com/your-repo/snapsync.git
-cd snapsync
-chmod +x remote_restore.sh
+git clone https://github.com/kelenetwork/SnapSync.git
+cd SnapSync
+chmod +x SnapSync remote_restore
 sudo ./remote_restore.sh
 ```
 
@@ -268,16 +268,16 @@ sudo ./remote_restore.sh
 
 ---
 
-- 🐛 问题反馈：[GitHub Issues](https://github.com/your-repo/snapsync/issues)  
-- 💬 讨论交流：[GitHub Discussions](https://github.com/your-repo/snapsync/discussions)  
-- 📧 邮件支持：snapsync-support@example.com  
+- 🐛 问题反馈：[GitHub Issues](https://github.com/kelenetwork/snapsync/issues)  
+- 💬 讨论交流：[GitHub Discussions](https://github.com/kelenetwork/snapsync/discussions)  
+- 📧 邮件支持：snapsync-support@kele.my  
 
 <div align="center">
   <p><strong>SnapSync - 让系统恢复变得简单可靠</strong></p>
   <p>
-    <a href="https://github.com/your-repo/snapsync">GitHub 仓库</a> •
-    <a href="https://github.com/your-repo/snapsync/wiki">文档</a> •
-    <a href="https://github.com/your-repo/snapsync/releases">下载</a>
+    <a href="https://github.com/kelenetwork/snapsync">GitHub 仓库</a> •
+    <a href="https://github.com/kelenetwork/snapsync/wiki">文档</a> •
+    <a href="https://github.com/kelenetwork/snapsync/GitHub">下载</a>
   </p>
   <p><sub>© 2024 SnapSync Development Team. MIT License.</sub></p>
 </div>
