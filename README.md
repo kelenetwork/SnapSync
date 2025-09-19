@@ -72,7 +72,7 @@
 
 ---
 
-## 📦 安装指南
+## 📦 安装指南（备份）
 
 ### 方法一：Git 克隆
 ```bash
@@ -94,6 +94,16 @@ sudo yum install -y tar gzip bzip2 xz curl openssh-clients acl attr bc
 ```
 
 ---
+## 📦 安装指南（恢复）
+
+### 方法一：Git 克隆
+```bash
+git clone https://github.com/kelenetwork/SnapSync.git
+cd SnapSync
+chmod +x SnapSync remote_restore
+./remote_restore
+```
+
 
 ## ⚙️ 配置说明
 
