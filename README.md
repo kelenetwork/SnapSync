@@ -43,11 +43,11 @@
 - systemctl
 
 # 权限要求
-- root 权限```
-
+- root 权限
+---
 ## 📂 目录结构
 
-```
+
 .
 ├─ SnapSync                 # 安装与初始化向导（执行一次即可）
 ├─ remote_restore           # 恢复脚本
