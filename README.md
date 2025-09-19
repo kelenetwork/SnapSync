@@ -43,7 +43,7 @@
 - systemctl
 
 # 权限要求
-- root 权限
+- root 权限```
 
 ## 📂 目录结构
 
@@ -52,12 +52,13 @@
 ├─ SnapSync                 # 安装与初始化向导（执行一次即可）
 ├─ remote_restore           # 恢复脚本
 └─ README.md
+```
 # 安装后自动生成：
 /etc/system_snapshot/config.conf
 /usr/local/sbin/system_snapshot.sh
 /var/log/system_snapshot/{install,snapshot,debug,restore}.log
 /etc/systemd/system/system-snapshot.{service,timer}
-```
+
 
 ---
 
