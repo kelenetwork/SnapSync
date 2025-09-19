@@ -74,19 +74,12 @@
 
 ## 📦 安装指南
 
-### 方法一：直接下载
-```bash
-wget https://raw.githubusercontent.com/your-repo/snapsync/main/remote_restore.sh
-chmod +x remote_restore.sh
-sudo ./remote_restore.sh
-```
-
-### 方法二：Git 克隆
+### 方法一：Git 克隆
 ```bash
 git clone https://github.com/kelenetwork/SnapSync.git
 cd SnapSync
 chmod +x SnapSync remote_restore
-sudo ./remote_restore.sh
+./SnapSync
 ```
 
 ### 安装依赖（Ubuntu/Debian）
