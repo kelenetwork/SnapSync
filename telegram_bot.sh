@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# SnapSync v3.0 - Telegram Bot（多VPS管理版）
-# 支持：同一个Bot管理多个VPS
+# SnapSync v3.0 - Telegram Bot（按钮交互版）
+# 支持：按钮式交互 + 多VPS管理
 
 set -euo pipefail
 
@@ -30,38 +30,31 @@ HOSTNAME="${HOSTNAME:-$(hostname)}"
 
 # ===== 工具函数 =====
 log_bot() {
-    echo "$(date '+%F %T') [$HOSTNAME] [BOT] $*" >> "$LOG_FILE"
+    echo "$(date '+%F %T') [$HOSTNAME] $*" >> "$LOG_FILE"
 }
 
-# 发送消息（自动添加主机标识）
+# 发送消息（带VPS标识）
 send_message() {
     local chat_id="$1"
     local text="$2"
     local parse_mode="${3:-HTML}"
     
-    # 在消息开头添加VPS标识
     local vps_header="🖥️ <b>${HOSTNAME}</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 "
     local full_text="${vps_header}${text}"
     
-    local response=$(curl -sS -X POST "${API_URL}/sendMessage" \
+    curl -sS -X POST "${API_URL}/sendMessage" \
         -d "chat_id=${chat_id}" \
         --data-urlencode "text=${full_text}" \
         -d "parse_mode=${parse_mode}" \
-        -d "disable_web_page_preview=true")
+        -d "disable_web_page_preview=true" &>/dev/null
     
-    if [[ $? -eq 0 ]]; then
-        log_bot "消息已发送"
-        return 0
-    else
-        log_bot "发送失败: ${response}"
-        return 1
-    fi
+    log_bot "消息已发送"
 }
 
 # 发送带按钮的消息
-send_message_with_keyboard() {
+send_message_with_buttons() {
     local chat_id="$1"
     local text="$2"
     local keyboard="$3"
@@ -73,6 +66,28 @@ send_message_with_keyboard() {
     
     curl -sS -X POST "${API_URL}/sendMessage" \
         -d "chat_id=${chat_id}" \
+        --data-urlencode "text=${full_text}" \
+        -d "parse_mode=HTML" \
+        -d "reply_markup=${keyboard}" &>/dev/null
+    
+    log_bot "按钮消息已发送"
+}
+
+# 编辑消息
+edit_message() {
+    local chat_id="$1"
+    local message_id="$2"
+    local text="$3"
+    local keyboard="$4"
+    
+    local vps_header="🖥️ <b>${HOSTNAME}</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+"
+    local full_text="${vps_header}${text}"
+    
+    curl -sS -X POST "${API_URL}/editMessageText" \
+        -d "chat_id=${chat_id}" \
+        -d "message_id=${message_id}" \
         --data-urlencode "text=${full_text}" \
         -d "parse_mode=HTML" \
         -d "reply_markup=${keyboard}" &>/dev/null
@@ -89,16 +104,49 @@ answer_callback() {
 
 format_bytes() {
     local bytes="$1"
-    if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then echo "0B"; return; fi
+    [[ ! "$bytes" =~ ^[0-9]+$ ]] && echo "0B" && return
     if (( bytes >= 1073741824 )); then
         echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1073741824}")GB"
     elif (( bytes >= 1048576 )); then
         echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1048576}")MB"
-    elif (( bytes >= 1024 )); then
-        echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1024}")KB"
     else
-        echo "${bytes}B"
+        echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1024}")KB"
     fi
+}
+
+# ===== 按钮构建函数 =====
+
+# 主菜单按钮
+get_main_menu_keyboard() {
+    echo '{
+  "inline_keyboard": [
+    [{"text": "📊 系统状态", "callback_data": "menu_status"}],
+    [{"text": "📋 快照列表", "callback_data": "menu_list"}],
+    [{"text": "🔄 创建快照", "callback_data": "menu_create"}],
+    [{"text": "⚙️ 配置信息", "callback_data": "menu_config"}],
+    [{"text": "🗑️ 删除快照", "callback_data": "menu_delete"}],
+    [{"text": "❓ 帮助", "callback_data": "menu_help"}]
+  ]
+}'
+}
+
+# 返回主菜单按钮
+get_back_button() {
+    echo '{
+  "inline_keyboard": [
+    [{"text": "🔙 返回主菜单", "callback_data": "menu_main"}]
+  ]
+}'
+}
+
+# 确认/取消按钮
+get_confirm_buttons() {
+    local action="$1"
+    echo "{
+  \"inline_keyboard\": [
+    [{\"text\": \"✅ 确认\", \"callback_data\": \"confirm_${action}\"}, {\"text\": \"❌ 取消\", \"callback_data\": \"cancel\"}]
+  ]
+}"
 }
 
 # ===== Bot 命令处理 =====
@@ -111,411 +159,408 @@ cmd_start() {
 📍 当前VPS: ${HOSTNAME}
 📊 版本: v3.0
 
-<b>可用命令:</b>
-/status - 系统状态
-/list - 快照列表
-/create - 创建快照
-/delete - 删除快照
-/config - 查看配置
-/help - 帮助信息
+<b>🎯 快速开始:</b>
+点击下方按钮进行操作
 
 <b>💡 多VPS管理:</b>
-所有消息都会显示主机名
-可以在多个VPS上使用同一个Bot
+• 所有消息显示主机名
+• 可在多个VPS使用同一Bot
+• 按钮交互，操作更简单"
 
-<i>提示: 点击命令或直接输入</i>"
-
-    send_message "$chat_id" "$message"
+    send_message_with_buttons "$chat_id" "$message" "$(get_main_menu_keyboard)"
 }
 
-cmd_help() {
+cmd_menu() {
     local chat_id="$1"
     
-    local message="📖 <b>命令帮助</b>
+    local message="📱 <b>主菜单</b>
 
-<b>📊 查询命令:</b>
-/status - 显示系统状态
-/list - 列出所有快照
-/config - 查看配置信息
+选择要执行的操作:"
 
-<b>🔧 管理命令:</b>
-/create - 创建系统快照
-/delete &lt;id&gt; - 删除快照
-  例: /delete 2
-
-<b>⚙️ 配置命令:</b>
-/setconfig &lt;key&gt; &lt;value&gt;
-  例: /setconfig LOCAL_KEEP_COUNT 10
-
-<b>🛠️ 系统命令:</b>
-/restart - 重启Bot服务
-/logs - 查看最近日志
-
-<b>🖥️ 多VPS管理:</b>
-每条消息开头都会显示主机名
-在多个VPS上配置相同的Bot Token和Chat ID
-Bot会自动区分不同的VPS
-
-<i>需要帮助? 查看文档或联系管理员</i>"
-
-    send_message "$chat_id" "$message"
+    send_message_with_buttons "$chat_id" "$message" "$(get_main_menu_keyboard)"
 }
 
-cmd_status() {
+# ===== 按钮回调处理 =====
+
+handle_menu_main() {
     local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
     
-    log_bot "执行 status 命令"
+    answer_callback "$callback_id" "主菜单"
     
-    # 系统信息
+    local message="📱 <b>主菜单</b>
+
+选择要执行的操作:"
+
+    edit_message "$chat_id" "$message_id" "$message" "$(get_main_menu_keyboard)"
+}
+
+handle_menu_status() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "加载中..."
+    
+    # 获取状态信息
     local uptime_info=$(uptime -p 2>/dev/null || echo "N/A")
-    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | xargs)
-    local cpu_count=$(nproc)
-    
-    # 内存信息
+    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | xargs | cut -d',' -f1)
     local mem_info=$(free -h | awk 'NR==2 {print $3"/"$2}')
     
-    # 磁盘信息
     local backup_dir="${BACKUP_DIR:-/backups}"
     local disk_info=$(df -h "$backup_dir" 2>/dev/null | tail -n1)
     local disk_usage=$(echo "$disk_info" | awk '{print $5}')
     local disk_free=$(echo "$disk_info" | awk '{print $4}')
     
-    # 快照信息
     local snapshot_dir="${backup_dir}/system_snapshots"
-    local snapshot_count=0
-    local latest_snapshot="无"
+    local snapshot_count=$(find "$snapshot_dir" -name "*.tar*" 2>/dev/null | wc -l)
+    
+    local latest="无"
     local latest_size="N/A"
     local latest_date="N/A"
     
-    if [[ -d "$snapshot_dir" ]]; then
-        snapshot_count=$(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | wc -l)
-        
-        local latest_file=$(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r | head -1)
+    if (( snapshot_count > 0 )); then
+        local latest_file=$(find "$snapshot_dir" -name "*.tar*" 2>/dev/null | sort -r | head -1)
         if [[ -n "$latest_file" ]]; then
-            latest_snapshot=$(basename "$latest_file")
+            latest=$(basename "$latest_file")
             latest_size=$(format_bytes "$(stat -c%s "$latest_file" 2>/dev/null || echo 0)")
-            latest_date=$(date -r "$latest_file" "+%m-%d %H:%M" 2>/dev/null || echo "N/A")
+            latest_date=$(date -r "$latest_file" "+%m-%d %H:%M" 2>/dev/null)
         fi
     fi
     
-    # 下次备份
     local next_backup="未启用"
-    if [[ "${AUTO_BACKUP_ENABLED}" == "true" ]] || [[ "${AUTO_BACKUP_ENABLED}" == "Y" ]]; then
+    if [[ "${AUTO_BACKUP_ENABLED}" =~ ^[Yy]|true$ ]]; then
         next_backup=$(systemctl list-timers snapsync-backup.timer 2>/dev/null | awk 'NR==2 {print $1" "$2}' || echo "N/A")
     fi
     
-    # IP地址
-    local public_ip=$(curl -sS -m 5 ifconfig.me 2>/dev/null || echo "N/A")
-    
     local message="📊 <b>系统状态</b>
 
-<b>🖥️ 系统信息</b>
+<b>🖥️ 系统</b>
 运行时间: ${uptime_info}
-CPU负载: ${load_avg} (${cpu_count}核)
-内存使用: ${mem_info}
-公网IP: ${public_ip}
+负载: ${load_avg}
+内存: ${mem_info}
 
-<b>💾 存储信息</b>
+<b>💾 存储</b>
 磁盘使用: ${disk_usage}
 可用空间: ${disk_free}
-备份目录: ${backup_dir}
 
-<b>📸 快照信息</b>
-快照总数: ${snapshot_count} 个
-最新快照: ${latest_snapshot}
-快照大小: ${latest_size}
-创建时间: ${latest_date}
+<b>📸 快照</b>
+快照数: ${snapshot_count}个
+最新: ${latest}
+大小: ${latest_size}
+时间: ${latest_date}
 
-<b>⏰ 定时任务</b>
+<b>⏰ 定时</b>
 自动备份: ${AUTO_BACKUP_ENABLED}
 下次运行: ${next_backup}
 
-<b>🌐 远程备份</b>
-远程上传: ${REMOTE_ENABLED}
-远程主机: ${REMOTE_HOST:-未配置}
+<i>更新: $(date '+%m-%d %H:%M')</i>"
 
-<i>更新: $(date '+%m-%d %H:%M:%S')</i>"
-
-    send_message "$chat_id" "$message"
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
 }
 
-cmd_list() {
+handle_menu_list() {
     local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
     
-    log_bot "执行 list 命令"
+    answer_callback "$callback_id" "加载中..."
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
-    
-    if [[ ! -d "$snapshot_dir" ]]; then
-        send_message "$chat_id" "❌ 快照目录不存在"
-        return
-    fi
-    
     local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
-        send_message "$chat_id" "📋 暂无快照文件"
+        local message="📋 <b>快照列表</b>
+
+暂无快照文件
+
+<i>使用「创建快照」功能创建第一个快照</i>"
+        edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
         return
     fi
     
     local message="📋 <b>快照列表</b> (${#snapshots[@]}个)
+
 "
     
+    local max_show=5
     for i in "${!snapshots[@]}"; do
+        (( i >= max_show )) && break
+        
         local file="${snapshots[$i]}"
         local name=$(basename "$file")
         local size=$(format_bytes "$(stat -c%s "$file" 2>/dev/null || echo 0)")
-        local date=$(date -r "$file" "+%m-%d %H:%M" 2>/dev/null || echo "N/A")
+        local date=$(date -r "$file" "+%m-%d %H:%M" 2>/dev/null)
         
-        message+="
-<b>$((i+1)).</b> <code>${name}</code>
-   📦 ${size} | 📅 ${date}"
+        message+="<b>$((i+1)).</b> <code>${name:17:14}</code>
+   📦 ${size} | 📅 ${date}
+
+"
     done
+    
+    if (( ${#snapshots[@]} > max_show )); then
+        message+="
+<i>... 还有 $((${#snapshots[@]} - max_show)) 个快照</i>"
+    fi
     
     message+="
 
-<i>删除快照: /delete &lt;编号&gt;</i>"
+<i>删除快照请使用「删除快照」功能</i>"
     
-    # 分割长消息
-    if [[ ${#message} -gt 4000 ]]; then
-        local part1="${message:0:4000}"
-        local part2="${message:4000}"
-        send_message "$chat_id" "$part1"
-        sleep 1
-        send_message "$chat_id" "$part2"
-    else
-        send_message "$chat_id" "$message"
-    fi
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
 }
 
-cmd_create() {
+handle_menu_create() {
     local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
     
-    log_bot "执行 create 命令"
+    answer_callback "$callback_id" "准备创建..."
     
-    send_message "$chat_id" "🔄 <b>开始创建快照</b>
+    local message="🔄 <b>创建快照</b>
 
-⏳ 备份进行中...
+即将创建系统快照
+
+<b>⚠️ 注意:</b>
+• 备份需要几分钟时间
+• 期间请勿关闭服务器
+• 完成后会发送通知
+
+确认创建快照?"
+
+    local keyboard='{
+  "inline_keyboard": [
+    [{"text": "✅ 确认创建", "callback_data": "confirm_create"}],
+    [{"text": "❌ 取消", "callback_data": "menu_main"}]
+  ]
+}'
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_confirm_create() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "开始备份..."
+    
+    local message="🔄 <b>备份进行中</b>
+
+⏳ 正在创建快照...
 这可能需要几分钟
 
-备份完成后会发送通知"
+备份完成后会自动通知"
+
+    edit_message "$chat_id" "$message_id" "$message" "{\"inline_keyboard\":[]}"
     
     # 异步执行备份
     (
-        if /opt/snapsync/modules/backup.sh &>>"$LOG_FILE"; then
-            send_message "$chat_id" "✅ <b>快照创建成功</b>
+        if /opt/snapsync/modules/backup.sh &>>/var/log/snapsync/bot.log; then
+            send_message_with_buttons "$chat_id" "✅ <b>快照创建成功</b>
 
-使用 /list 查看快照列表"
+使用「快照列表」查看" "$(get_main_menu_keyboard)"
         else
-            send_message "$chat_id" "❌ <b>快照创建失败</b>
+            send_message_with_buttons "$chat_id" "❌ <b>快照创建失败</b>
 
-请使用 /logs 查看错误日志"
+请查看日志获取详细信息" "$(get_main_menu_keyboard)"
         fi
     ) &
 }
 
-cmd_delete() {
+handle_menu_delete() {
     local chat_id="$1"
-    local snapshot_id="$2"
-    
-    if [[ -z "$snapshot_id" ]]; then
-        send_message "$chat_id" "❌ 用法: /delete &lt;编号&gt;
-
-示例: /delete 2
-
-先使用 /list 查看快照编号"
-        return
-    fi
-    
-    log_bot "执行 delete 命令: ${snapshot_id}"
-    
-    local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
-    
-    if [[ ! "$snapshot_id" =~ ^[0-9]+$ ]] || (( snapshot_id < 1 )) || (( snapshot_id > ${#snapshots[@]} )); then
-        send_message "$chat_id" "❌ 无效的编号: ${snapshot_id}
-
-可用范围: 1-${#snapshots[@]}
-使用 /list 查看快照"
-        return
-    fi
-    
-    local file="${snapshots[$((snapshot_id-1))]}"
-    local name=$(basename "$file")
-    
-    # 创建确认按钮
-    local keyboard='{"inline_keyboard":[[{"text":"✅ 确认删除","callback_data":"confirm_delete_'${snapshot_id}'"},{"text":"❌ 取消","callback_data":"cancel_delete"}]]}'
-    
-    local message="🗑️ <b>删除确认</b>
-
-快照文件:
-<code>${name}</code>
-
-<b>⚠️ 警告: 此操作不可撤销！</b>"
-    
-    send_message_with_keyboard "$chat_id" "$message" "$keyboard"
-}
-
-handle_delete_confirm() {
-    local chat_id="$1"
-    local snapshot_id="$2"
+    local message_id="$2"
     local callback_id="$3"
     
-    log_bot "确认删除快照: ${snapshot_id}"
+    answer_callback "$callback_id" "加载快照..."
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
     local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
     
-    local file="${snapshots[$((snapshot_id-1))]}"
+    if [[ ${#snapshots[@]} -eq 0 ]]; then
+        local message="🗑️ <b>删除快照</b>
+
+暂无可删除的快照"
+        edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+        return
+    fi
+    
+    # 构建快照选择按钮
+    local buttons="["
+    local count=0
+    for i in "${!snapshots[@]}"; do
+        (( count >= 5 )) && break
+        
+        local file="${snapshots[$i]}"
+        local name=$(basename "$file")
+        local short_name="${name:17:14}"
+        
+        buttons+="{\"text\": \"$((i+1)). ${short_name}\", \"callback_data\": \"delete_${i}\"},"
+        ((count++))
+    done
+    buttons="${buttons%,}]"
+    
+    local keyboard="{\"inline_keyboard\":[$buttons,[{\"text\":\"🔙 返回\",\"callback_data\":\"menu_main\"}]]}"
+    
+    local message="🗑️ <b>删除快照</b>
+
+选择要删除的快照:
+
+<i>点击快照编号确认删除</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_delete_snapshot() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local snapshot_id="$4"
+    
+    answer_callback "$callback_id" "准备删除..."
+    
+    local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
+    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    
+    if [[ ! "$snapshot_id" =~ ^[0-9]+$ ]] || (( snapshot_id >= ${#snapshots[@]} )); then
+        answer_callback "$callback_id" "无效的快照"
+        return
+    fi
+    
+    local file="${snapshots[$snapshot_id]}"
+    local name=$(basename "$file")
+    
+    local message="🗑️ <b>确认删除</b>
+
+快照: <code>${name}</code>
+
+<b>⚠️ 此操作不可撤销！</b>
+
+确认删除此快照?"
+
+    local keyboard="{
+  \"inline_keyboard\": [
+    [{\"text\": \"✅ 确认删除\", \"callback_data\": \"confirm_delete_${snapshot_id}\"}],
+    [{\"text\": \"❌ 取消\", \"callback_data\": \"menu_delete\"}]
+  ]
+}"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_confirm_delete() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local snapshot_id="$4"
+    
+    answer_callback "$callback_id" "删除中..."
+    
+    local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
+    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    
+    local file="${snapshots[$snapshot_id]}"
     local name=$(basename "$file")
     
     if rm -f "$file" "${file}.sha256" 2>/dev/null; then
-        answer_callback "$callback_id" "已删除"
-        send_message "$chat_id" "✅ <b>删除成功</b>
-
-已删除: <code>${name}</code>
-
-使用 /list 查看剩余快照"
         log_bot "快照已删除: ${name}"
+        
+        local message="✅ <b>删除成功</b>
+
+已删除: <code>${name}</code>"
+        
+        edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
     else
-        answer_callback "$callback_id" "删除失败"
-        send_message "$chat_id" "❌ <b>删除失败</b>
+        local message="❌ <b>删除失败</b>
 
 可能原因：
 • 文件不存在
-• 权限不足
-
-请检查日志或手动删除"
+• 权限不足"
+        
+        edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
     fi
 }
 
-cmd_config() {
+handle_menu_config() {
     local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
     
-    log_bot "执行 config 命令"
+    answer_callback "$callback_id" "加载配置..."
     
     source "$CONFIG_FILE"
     
-    local message="⚙️ <b>当前配置</b>
+    local message="⚙️ <b>配置信息</b>
 
 <b>🔔 Telegram</b>
 启用: ${TELEGRAM_ENABLED}
-Chat ID: ${TELEGRAM_CHAT_ID}
 
 <b>🌐 远程备份</b>
 启用: ${REMOTE_ENABLED}
 服务器: ${REMOTE_HOST:-未配置}
-端口: ${REMOTE_PORT:-22}
 路径: ${REMOTE_PATH:-未配置}
 保留: ${REMOTE_KEEP_DAYS:-30}天
 
 <b>💾 本地备份</b>
 目录: ${BACKUP_DIR}
 压缩: 级别${COMPRESSION_LEVEL}
-线程: ${PARALLEL_THREADS}
 保留: ${LOCAL_KEEP_COUNT}个
 
 <b>⏰ 定时任务</b>
-启用: ${AUTO_BACKUP_ENABLED}
+自动备份: ${AUTO_BACKUP_ENABLED}
 间隔: ${BACKUP_INTERVAL_DAYS}天
 时间: ${BACKUP_TIME}
 
-<i>修改: /setconfig &lt;key&gt; &lt;value&gt;</i>"
+<i>修改配置请使用主控制台</i>"
 
-    send_message "$chat_id" "$message"
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
 }
 
-cmd_setconfig() {
+handle_menu_help() {
     local chat_id="$1"
-    local key="$2"
-    local value="$3"
+    local message_id="$2"
+    local callback_id="$3"
     
-    if [[ -z "$key" ]] || [[ -z "$value" ]]; then
-        send_message "$chat_id" "❌ 用法: /setconfig &lt;key&gt; &lt;value&gt;
-
-示例: /setconfig LOCAL_KEEP_COUNT 10
-
-可配置项:
-• LOCAL_KEEP_COUNT
-• REMOTE_KEEP_DAYS
-• COMPRESSION_LEVEL
-• BACKUP_INTERVAL_DAYS"
-        return
-    fi
+    answer_callback "$callback_id" "帮助"
     
-    log_bot "执行 setconfig: ${key}=${value}"
-    
-    # 验证
-    case "$key" in
-        LOCAL_KEEP_COUNT|REMOTE_KEEP_DAYS|BACKUP_INTERVAL_DAYS)
-            if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < 1 )); then
-                send_message "$chat_id" "❌ ${key} 必须是正整数"
-                return
-            fi
-            ;;
-        COMPRESSION_LEVEL)
-            if [[ ! "$value" =~ ^[1-9]$ ]]; then
-                send_message "$chat_id" "❌ 压缩级别必须是1-9"
-                return
-            fi
-            ;;
-        *)
-            send_message "$chat_id" "❌ 未知的配置项: ${key}"
-            return
-            ;;
-    esac
-    
-    # 修改
-    if sed -i "s/^${key}=.*/${key}=\"${value}\"/" "$CONFIG_FILE" 2>/dev/null; then
-        send_message "$chat_id" "✅ <b>配置已更新</b>
+    local message="❓ <b>使用帮助</b>
 
-${key} = ${value}
+<b>📱 按钮操作</b>
+• 点击按钮进行操作
+• 「🔙 返回」回到上级
+• 操作有确认步骤
 
-<i>部分配置需要重启服务生效</i>
-使用 /restart 重启Bot"
-        log_bot "配置已更新: ${key}=${value}"
-        source "$CONFIG_FILE"
-    else
-        send_message "$chat_id" "❌ 配置更新失败"
-    fi
+<b>🖥️ 多VPS管理</b>
+• 每条消息显示主机名
+• 同一Bot管理多个VPS
+• 各VPS独立操作
+
+<b>📸 快照管理</b>
+• 创建: 系统完整备份
+• 列表: 查看所有快照
+• 删除: 清理旧快照
+
+<b>⚙️ 配置</b>
+• 修改配置需使用控制台
+• 命令: <code>snapsync</code>
+
+<b>💡 提示</b>
+• 定期检查快照状态
+• 保持足够磁盘空间
+• 测试恢复流程"
+
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
 }
 
-cmd_logs() {
+handle_cancel() {
     local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
     
-    log_bot "执行 logs 命令"
-    
-    local backup_log="/var/log/snapsync/backup.log"
-    
-    if [[ ! -f "$backup_log" ]]; then
-        send_message "$chat_id" "❌ 日志文件不存在"
-        return
-    fi
-    
-    local recent_logs=$(tail -20 "$backup_log" | sed 's/</\&lt;/g; s/>/\&gt;/g')
-    
-    local message="📋 <b>最近日志</b> (20行)
-
-<code>${recent_logs}</code>
-
-<i>完整日志: ${backup_log}</i>"
-    
-    send_message "$chat_id" "$message"
-}
-
-cmd_restart() {
-    local chat_id="$1"
-    
-    log_bot "执行 restart 命令"
-    
-    send_message "$chat_id" "🔄 <b>重启Bot服务</b>
-
-⏳ 正在重启..."
-    
-    (
-        sleep 2
-        systemctl restart snapsync-bot.service
-    ) &
+    answer_callback "$callback_id" "已取消"
+    handle_menu_main "$chat_id" "$message_id" "$callback_id"
 }
 
 # ===== 消息路由 =====
@@ -523,7 +568,7 @@ handle_message() {
     local chat_id="$1"
     local text="$2"
     
-    # 验证chat_id
+    # 验证授权
     if [[ "$chat_id" != "$TELEGRAM_CHAT_ID" ]]; then
         log_bot "未授权访问: ${chat_id}"
         send_message "$chat_id" "⛔ 未授权
@@ -534,55 +579,55 @@ handle_message() {
     
     log_bot "收到消息: ${text}"
     
-    # 解析命令
-    local cmd=$(echo "$text" | awk '{print $1}')
-    local arg1=$(echo "$text" | awk '{print $2}')
-    local arg2=$(echo "$text" | awk '{print $3}')
-    
-    case "$cmd" in
+    case "$text" in
         /start) cmd_start "$chat_id" ;;
-        /help) cmd_help "$chat_id" ;;
-        /status) cmd_status "$chat_id" ;;
-        /list) cmd_list "$chat_id" ;;
-        /create) cmd_create "$chat_id" ;;
-        /delete) cmd_delete "$chat_id" "$arg1" ;;
-        /config) cmd_config "$chat_id" ;;
-        /setconfig) cmd_setconfig "$chat_id" "$arg1" "$arg2" ;;
-        /logs) cmd_logs "$chat_id" ;;
-        /restart) cmd_restart "$chat_id" ;;
+        /menu) cmd_menu "$chat_id" ;;
+        /status) handle_menu_status "$chat_id" "0" "0" ;;
+        /list) handle_menu_list "$chat_id" "0" "0" ;;
+        /help) handle_menu_help "$chat_id" "0" "0" ;;
         *)
-            send_message "$chat_id" "❓ 未知命令: ${cmd}
+            send_message_with_buttons "$chat_id" "❓ 未知命令
 
-使用 /help 查看可用命令"
+使用 /menu 打开菜单" "$(get_main_menu_keyboard)"
             ;;
     esac
 }
 
 handle_callback() {
     local chat_id="$1"
-    local data="$2"
-    local callback_id="$3"
+    local message_id="$2"
+    local data="$3"
+    local callback_id="$4"
     
     log_bot "收到回调: ${data}"
     
-    if [[ "$data" =~ ^confirm_delete_([0-9]+)$ ]]; then
-        local snapshot_id="${BASH_REMATCH[1]}"
-        handle_delete_confirm "$chat_id" "$snapshot_id" "$callback_id"
-    elif [[ "$data" == "cancel_delete" ]]; then
-        answer_callback "$callback_id" "已取消"
-        send_message "$chat_id" "❌ 操作已取消"
-    else
-        answer_callback "$callback_id" "未知操作"
-    fi
+    case "$data" in
+        menu_main) handle_menu_main "$chat_id" "$message_id" "$callback_id" ;;
+        menu_status) handle_menu_status "$chat_id" "$message_id" "$callback_id" ;;
+        menu_list) handle_menu_list "$chat_id" "$message_id" "$callback_id" ;;
+        menu_create) handle_menu_create "$chat_id" "$message_id" "$callback_id" ;;
+        menu_delete) handle_menu_delete "$chat_id" "$message_id" "$callback_id" ;;
+        menu_config) handle_menu_config "$chat_id" "$message_id" "$callback_id" ;;
+        menu_help) handle_menu_help "$chat_id" "$message_id" "$callback_id" ;;
+        confirm_create) handle_confirm_create "$chat_id" "$message_id" "$callback_id" ;;
+        delete_*) 
+            local id="${data#delete_}"
+            handle_delete_snapshot "$chat_id" "$message_id" "$callback_id" "$id"
+            ;;
+        confirm_delete_*)
+            local id="${data#confirm_delete_}"
+            handle_confirm_delete "$chat_id" "$message_id" "$callback_id" "$id"
+            ;;
+        cancel) handle_cancel "$chat_id" "$message_id" "$callback_id" ;;
+        *) answer_callback "$callback_id" "未知操作" ;;
+    esac
 }
 
 # ===== 主循环 =====
 get_updates() {
-    local timeout=60
-    
     curl -sS -X POST "${API_URL}/getUpdates" \
         -d "offset=${LAST_UPDATE_ID}" \
-        -d "timeout=${timeout}" \
+        -d "timeout=60" \
         -d "allowed_updates=[\"message\",\"callback_query\"]"
 }
 
@@ -604,7 +649,6 @@ process_updates() {
         if [[ "$message" != "null" ]]; then
             local chat_id=$(echo "$message" | jq -r '.chat.id')
             local text=$(echo "$message" | jq -r '.text // empty')
-            
             [[ -n "$text" ]] && handle_message "$chat_id" "$text"
         fi
         
@@ -612,10 +656,10 @@ process_updates() {
         local callback=$(echo "$update" | jq -r '.callback_query')
         if [[ "$callback" != "null" ]]; then
             local chat_id=$(echo "$callback" | jq -r '.message.chat.id')
+            local message_id=$(echo "$callback" | jq -r '.message.message_id')
             local data=$(echo "$callback" | jq -r '.data')
             local callback_id=$(echo "$callback" | jq -r '.id')
-            
-            handle_callback "$chat_id" "$data" "$callback_id"
+            handle_callback "$chat_id" "$message_id" "$data" "$callback_id"
         fi
     done <<< "$result"
 }
@@ -630,7 +674,7 @@ load_state() {
 
 cleanup() {
     save_state
-    log_bot "Bot服务停止"
+    log_bot "Bot停止"
     exit 0
 }
 
@@ -639,30 +683,27 @@ trap cleanup SIGTERM SIGINT
 # ===== 主程序 =====
 main() {
     log_bot "========================================"
-    log_bot "SnapSync Bot v3.0 启动 (多VPS支持)"
+    log_bot "SnapSync Bot v3.0 启动 (按钮交互版)"
     log_bot "主机: ${HOSTNAME}"
-    log_bot "Chat ID: ${TELEGRAM_CHAT_ID}"
     log_bot "========================================"
     
     load_state
     
     # 发送启动通知
-    send_message "$TELEGRAM_CHAT_ID" "🤖 <b>Bot已启动</b>
+    send_message_with_buttons "$TELEGRAM_CHAT_ID" "🤖 <b>Bot已启动</b>
 
 ⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
 
-使用 /help 查看命令
-使用 /status 查看状态"
+点击下方按钮开始操作" "$(get_main_menu_keyboard)"
     
     # 主循环
     while true; do
         if updates=$(get_updates); then
             process_updates "$updates"
         else
-            log_bot "获取更新失败，等待重试..."
+            log_bot "获取更新失败"
             sleep 5
         fi
-        
         save_state
     done
 }
