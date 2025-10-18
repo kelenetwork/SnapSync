@@ -34,11 +34,11 @@ log_success() {
     echo -e "$(date '+%F %T') ${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-# Telegram通知（修复版）
+# Telegram通知（修复版 - 支持大小写不敏感）
 send_telegram() {
     local message="$1"
     
-    # 详细检查Telegram配置（大小写不敏感）
+    # 详细检查Telegram配置（转为小写后比较）
     local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
     if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
         log_info "[TG] Telegram未启用 (TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-未设置})"
@@ -54,9 +54,6 @@ send_telegram() {
         log_error "[TG] CHAT_ID未设置"
         return 1
     fi
-    
-    # ... 其余代码保持不变
-}
     
     # 添加VPS标识（支持多VPS管理）
     local hostname="${HOSTNAME:-$(hostname)}"
@@ -89,7 +86,8 @@ ${message}"
 test_telegram() {
     log_info "${CYAN}测试 Telegram 连接...${NC}"
     
-    if [[ "${TELEGRAM_ENABLED:-false}" != "Y" && "${TELEGRAM_ENABLED:-false}" != "true" ]]; then
+    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
         log_info "Telegram未启用，跳过测试"
         return 0
     fi
@@ -410,9 +408,9 @@ upload_to_remote() {
 ⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
 
 请检查：
-• SSH密钥配置
-• 网络连接
-• 远程服务器状态"
+- SSH密钥配置
+- 网络连接
+- 远程服务器状态"
         return 1
     fi
     
@@ -518,7 +516,8 @@ main() {
     load_config
     
     # 测试Telegram（仅在启用时）
-    if [[ "${TELEGRAM_ENABLED}" =~ ^[Yy]|true$ ]]; then
+    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$tg_enabled" == "y" || "$tg_enabled" == "yes" || "$tg_enabled" == "true" ]]; then
         test_telegram || log_error "Telegram测试失败，但继续备份"
     fi
     
@@ -533,8 +532,10 @@ main() {
     clean_local_snapshots
     
     # 上传（如果启用）
-    if [[ "${REMOTE_ENABLED}" =~ ^[Yy]|true$ ]]; then
-        if [[ "${UPLOAD_REMOTE:-Y}" =~ ^[Yy]$ ]]; then
+    local remote_enabled=$(echo "${REMOTE_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$remote_enabled" == "y" || "$remote_enabled" == "yes" || "$remote_enabled" == "true" ]]; then
+        local upload_remote=$(echo "${UPLOAD_REMOTE:-Y}" | tr '[:upper:]' '[:lower:]')
+        if [[ "$upload_remote" == "y" || "$upload_remote" == "yes" ]]; then
             upload_to_remote "$snapshot_file" || log_error "上传失败"
         else
             log_info "跳过远程上传（用户选择）"
