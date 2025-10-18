@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# SnapSync v3.0 - Telegram Bot（按钮交互版）
-# 支持：按钮式交互 + 多VPS管理
+# SnapSync v3.0 - Telegram Bot（修复崩溃问题）
+# 修复：移除严格模式 + 添加错误处理 + 重试机制
 
-set -euo pipefail
+# 不使用 set -euo pipefail，改用手动错误检查
+set -u  # 只检查未定义变量
 
 # ===== 路径定义 =====
 CONFIG_FILE="/etc/snapsync/config.conf"
@@ -12,14 +13,17 @@ STATE_FILE="/var/run/snapsync-bot.state"
 
 # ===== 加载配置 =====
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "错误: 配置文件不存在"
+    echo "错误: 配置文件不存在" >&2
     exit 1
 fi
 
-source "$CONFIG_FILE"
+source "$CONFIG_FILE" || {
+    echo "错误: 无法加载配置文件" >&2
+    exit 1
+}
 
-if [[ -z "$TELEGRAM_BOT_TOKEN" ]] || [[ -z "$TELEGRAM_CHAT_ID" ]]; then
-    echo "错误: Telegram配置不完整"
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] || [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+    echo "错误: Telegram配置不完整" >&2
     exit 1
 fi
 
@@ -33,7 +37,7 @@ log_bot() {
     echo "$(date '+%F %T') [$HOSTNAME] $*" >> "$LOG_FILE"
 }
 
-# 发送消息（带VPS标识）
+# 发送消息（带错误处理）
 send_message() {
     local chat_id="$1"
     local text="$2"
@@ -44,13 +48,27 @@ send_message() {
 "
     local full_text="${vps_header}${text}"
     
-    curl -sS -X POST "${API_URL}/sendMessage" \
-        -d "chat_id=${chat_id}" \
-        --data-urlencode "text=${full_text}" \
-        -d "parse_mode=${parse_mode}" \
-        -d "disable_web_page_preview=true" &>/dev/null
+    # 重试3次
+    local retry=0
+    local max_retry=3
     
-    log_bot "消息已发送"
+    while (( retry < max_retry )); do
+        if curl -sS -m 10 -X POST "${API_URL}/sendMessage" \
+            -d "chat_id=${chat_id}" \
+            --data-urlencode "text=${full_text}" \
+            -d "parse_mode=${parse_mode}" \
+            -d "disable_web_page_preview=true" &>/dev/null; then
+            log_bot "消息已发送"
+            return 0
+        fi
+        
+        ((retry++))
+        log_bot "发送失败，重试 ${retry}/${max_retry}"
+        sleep 2
+    done
+    
+    log_bot "发送消息失败（已重试${max_retry}次）"
+    return 1
 }
 
 # 发送带按钮的消息
@@ -64,13 +82,26 @@ send_message_with_buttons() {
 "
     local full_text="${vps_header}${text}"
     
-    curl -sS -X POST "${API_URL}/sendMessage" \
-        -d "chat_id=${chat_id}" \
-        --data-urlencode "text=${full_text}" \
-        -d "parse_mode=HTML" \
-        -d "reply_markup=${keyboard}" &>/dev/null
+    local retry=0
+    local max_retry=3
     
-    log_bot "按钮消息已发送"
+    while (( retry < max_retry )); do
+        if curl -sS -m 10 -X POST "${API_URL}/sendMessage" \
+            -d "chat_id=${chat_id}" \
+            --data-urlencode "text=${full_text}" \
+            -d "parse_mode=HTML" \
+            -d "reply_markup=${keyboard}" &>/dev/null; then
+            log_bot "按钮消息已发送"
+            return 0
+        fi
+        
+        ((retry++))
+        log_bot "发送失败，重试 ${retry}/${max_retry}"
+        sleep 2
+    done
+    
+    log_bot "发送按钮消息失败"
+    return 1
 }
 
 # 编辑消息
@@ -85,21 +116,24 @@ edit_message() {
 "
     local full_text="${vps_header}${text}"
     
-    curl -sS -X POST "${API_URL}/editMessageText" \
+    curl -sS -m 10 -X POST "${API_URL}/editMessageText" \
         -d "chat_id=${chat_id}" \
         -d "message_id=${message_id}" \
         --data-urlencode "text=${full_text}" \
         -d "parse_mode=HTML" \
-        -d "reply_markup=${keyboard}" &>/dev/null
+        -d "reply_markup=${keyboard}" &>/dev/null || {
+        log_bot "编辑消息失败（可能消息内容未改变）"
+        return 1
+    }
 }
 
 answer_callback() {
     local callback_id="$1"
     local text="${2:-✓}"
     
-    curl -sS -X POST "${API_URL}/answerCallbackQuery" \
+    curl -sS -m 5 -X POST "${API_URL}/answerCallbackQuery" \
         -d "callback_query_id=${callback_id}" \
-        --data-urlencode "text=${text}" &>/dev/null
+        --data-urlencode "text=${text}" &>/dev/null || true
 }
 
 format_bytes() {
@@ -139,16 +173,6 @@ get_back_button() {
 }'
 }
 
-# 确认/取消按钮
-get_confirm_buttons() {
-    local action="$1"
-    echo "{
-  \"inline_keyboard\": [
-    [{\"text\": \"✅ 确认\", \"callback_data\": \"confirm_${action}\"}, {\"text\": \"❌ 取消\", \"callback_data\": \"cancel\"}]
-  ]
-}"
-}
-
 # ===== Bot 命令处理 =====
 
 cmd_start() {
@@ -167,7 +191,9 @@ cmd_start() {
 • 可在多个VPS使用同一Bot
 • 按钮交互，操作更简单"
 
-    send_message_with_buttons "$chat_id" "$message" "$(get_main_menu_keyboard)"
+    send_message_with_buttons "$chat_id" "$message" "$(get_main_menu_keyboard)" || {
+        log_bot "启动消息发送失败，但继续运行"
+    }
 }
 
 cmd_menu() {
@@ -203,34 +229,34 @@ handle_menu_status() {
     
     answer_callback "$callback_id" "加载中..."
     
-    # 获取状态信息
+    # 获取状态信息（带错误处理）
     local uptime_info=$(uptime -p 2>/dev/null || echo "N/A")
-    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | xargs | cut -d',' -f1)
-    local mem_info=$(free -h | awk 'NR==2 {print $3"/"$2}')
+    local load_avg=$(uptime 2>/dev/null | awk -F'load average:' '{print $2}' | xargs | cut -d',' -f1 || echo "N/A")
+    local mem_info=$(free -h 2>/dev/null | awk 'NR==2 {print $3"/"$2}' || echo "N/A")
     
     local backup_dir="${BACKUP_DIR:-/backups}"
     local disk_info=$(df -h "$backup_dir" 2>/dev/null | tail -n1)
-    local disk_usage=$(echo "$disk_info" | awk '{print $5}')
-    local disk_free=$(echo "$disk_info" | awk '{print $4}')
+    local disk_usage=$(echo "$disk_info" | awk '{print $5}' || echo "N/A")
+    local disk_free=$(echo "$disk_info" | awk '{print $4}' || echo "N/A")
     
     local snapshot_dir="${backup_dir}/system_snapshots"
-    local snapshot_count=$(find "$snapshot_dir" -name "*.tar*" 2>/dev/null | wc -l)
+    local snapshot_count=$(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | wc -l || echo 0)
     
     local latest="无"
     local latest_size="N/A"
     local latest_date="N/A"
     
     if (( snapshot_count > 0 )); then
-        local latest_file=$(find "$snapshot_dir" -name "*.tar*" 2>/dev/null | sort -r | head -1)
-        if [[ -n "$latest_file" ]]; then
+        local latest_file=$(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r | head -1 || echo "")
+        if [[ -n "$latest_file" && -f "$latest_file" ]]; then
             latest=$(basename "$latest_file")
             latest_size=$(format_bytes "$(stat -c%s "$latest_file" 2>/dev/null || echo 0)")
-            latest_date=$(date -r "$latest_file" "+%m-%d %H:%M" 2>/dev/null)
+            latest_date=$(date -r "$latest_file" "+%m-%d %H:%M" 2>/dev/null || echo "N/A")
         fi
     fi
     
     local next_backup="未启用"
-    if [[ "${AUTO_BACKUP_ENABLED}" =~ ^[Yy]|true$ ]]; then
+    if [[ "${AUTO_BACKUP_ENABLED:-false}" =~ ^[Yy]|true$ ]]; then
         next_backup=$(systemctl list-timers snapsync-backup.timer 2>/dev/null | awk 'NR==2 {print $1" "$2}' || echo "N/A")
     fi
     
@@ -252,7 +278,7 @@ handle_menu_status() {
 时间: ${latest_date}
 
 <b>⏰ 定时</b>
-自动备份: ${AUTO_BACKUP_ENABLED}
+自动备份: ${AUTO_BACKUP_ENABLED:-false}
 下次运行: ${next_backup}
 
 <i>更新: $(date '+%m-%d %H:%M')</i>"
@@ -268,7 +294,14 @@ handle_menu_list() {
     answer_callback "$callback_id" "加载中..."
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    
+    # 使用数组安全读取
+    local snapshots=()
+    if [[ -d "$snapshot_dir" ]]; then
+        while IFS= read -r -d '' file; do
+            snapshots+=("$file")
+        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    fi
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
         local message="📋 <b>快照列表</b>
@@ -291,7 +324,7 @@ handle_menu_list() {
         local file="${snapshots[$i]}"
         local name=$(basename "$file")
         local size=$(format_bytes "$(stat -c%s "$file" 2>/dev/null || echo 0)")
-        local date=$(date -r "$file" "+%m-%d %H:%M" 2>/dev/null)
+        local date=$(date -r "$file" "+%m-%d %H:%M" 2>/dev/null || echo "未知")
         
         message+="<b>$((i+1)).</b> <code>${name:17:14}</code>
    📦 ${size} | 📅 ${date}
@@ -377,7 +410,13 @@ handle_menu_delete() {
     answer_callback "$callback_id" "加载快照..."
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    
+    local snapshots=()
+    if [[ -d "$snapshot_dir" ]]; then
+        while IFS= read -r -d '' file; do
+            snapshots+=("$file")
+        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    fi
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
         local message="🗑️ <b>删除快照</b>
@@ -422,7 +461,13 @@ handle_delete_snapshot() {
     answer_callback "$callback_id" "准备删除..."
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    
+    local snapshots=()
+    if [[ -d "$snapshot_dir" ]]; then
+        while IFS= read -r -d '' file; do
+            snapshots+=("$file")
+        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    fi
     
     if [[ ! "$snapshot_id" =~ ^[0-9]+$ ]] || (( snapshot_id >= ${#snapshots[@]} )); then
         answer_callback "$callback_id" "无效的快照"
@@ -459,7 +504,13 @@ handle_confirm_delete() {
     answer_callback "$callback_id" "删除中..."
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    
+    local snapshots=()
+    if [[ -d "$snapshot_dir" ]]; then
+        while IFS= read -r -d '' file; do
+            snapshots+=("$file")
+        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    fi
     
     local file="${snapshots[$snapshot_id]}"
     local name=$(basename "$file")
@@ -490,28 +541,31 @@ handle_menu_config() {
     
     answer_callback "$callback_id" "加载配置..."
     
-    source "$CONFIG_FILE"
+    source "$CONFIG_FILE" || {
+        log_bot "加载配置失败"
+        return
+    }
     
     local message="⚙️ <b>配置信息</b>
 
 <b>🔔 Telegram</b>
-启用: ${TELEGRAM_ENABLED}
+启用: ${TELEGRAM_ENABLED:-false}
 
 <b>🌐 远程备份</b>
-启用: ${REMOTE_ENABLED}
+启用: ${REMOTE_ENABLED:-false}
 服务器: ${REMOTE_HOST:-未配置}
 路径: ${REMOTE_PATH:-未配置}
 保留: ${REMOTE_KEEP_DAYS:-30}天
 
 <b>💾 本地备份</b>
-目录: ${BACKUP_DIR}
-压缩: 级别${COMPRESSION_LEVEL}
-保留: ${LOCAL_KEEP_COUNT}个
+目录: ${BACKUP_DIR:-/backups}
+压缩: 级别${COMPRESSION_LEVEL:-6}
+保留: ${LOCAL_KEEP_COUNT:-5}个
 
 <b>⏰ 定时任务</b>
-自动备份: ${AUTO_BACKUP_ENABLED}
-间隔: ${BACKUP_INTERVAL_DAYS}天
-时间: ${BACKUP_TIME}
+自动备份: ${AUTO_BACKUP_ENABLED:-false}
+间隔: ${BACKUP_INTERVAL_DAYS:-7}天
+时间: ${BACKUP_TIME:-03:00}
 
 <i>修改配置请使用主控制台</i>"
 
@@ -625,54 +679,64 @@ handle_callback() {
 
 # ===== 主循环 =====
 get_updates() {
-    curl -sS -X POST "${API_URL}/getUpdates" \
+    curl -sS -m 65 -X POST "${API_URL}/getUpdates" \
         -d "offset=${LAST_UPDATE_ID}" \
         -d "timeout=60" \
-        -d "allowed_updates=[\"message\",\"callback_query\"]"
+        -d "allowed_updates=[\"message\",\"callback_query\"]" 2>&1
 }
 
 process_updates() {
     local updates="$1"
     
-    local ok=$(echo "$updates" | jq -r '.ok')
+    # 检查是否是有效的 JSON
+    if ! echo "$updates" | jq -e . >/dev/null 2>&1; then
+        log_bot "无效的JSON响应，跳过"
+        return
+    fi
+    
+    local ok=$(echo "$updates" | jq -r '.ok // false')
     [[ "$ok" != "true" ]] && return
     
-    local result=$(echo "$updates" | jq -c '.result[]')
+    local result=$(echo "$updates" | jq -c '.result[]' 2>/dev/null)
     [[ -z "$result" ]] && return
     
     while IFS= read -r update; do
-        local update_id=$(echo "$update" | jq -r '.update_id')
+        local update_id=$(echo "$update" | jq -r '.update_id // 0')
+        [[ "$update_id" == "0" ]] && continue
+        
         LAST_UPDATE_ID=$((update_id + 1))
         
         # 处理消息
-        local message=$(echo "$update" | jq -r '.message')
+        local message=$(echo "$update" | jq -r '.message // null')
         if [[ "$message" != "null" ]]; then
-            local chat_id=$(echo "$message" | jq -r '.chat.id')
-            local text=$(echo "$message" | jq -r '.text // empty')
-            [[ -n "$text" ]] && handle_message "$chat_id" "$text"
+            local chat_id=$(echo "$message" | jq -r '.chat.id // ""')
+            local text=$(echo "$message" | jq -r '.text // ""')
+            [[ -n "$chat_id" && -n "$text" ]] && handle_message "$chat_id" "$text"
         fi
         
         # 处理回调
-        local callback=$(echo "$update" | jq -r '.callback_query')
+        local callback=$(echo "$update" | jq -r '.callback_query // null')
         if [[ "$callback" != "null" ]]; then
-            local chat_id=$(echo "$callback" | jq -r '.message.chat.id')
-            local message_id=$(echo "$callback" | jq -r '.message.message_id')
-            local data=$(echo "$callback" | jq -r '.data')
-            local callback_id=$(echo "$callback" | jq -r '.id')
-            handle_callback "$chat_id" "$message_id" "$data" "$callback_id"
+            local chat_id=$(echo "$callback" | jq -r '.message.chat.id // ""')
+            local message_id=$(echo "$callback" | jq -r '.message.message_id // ""')
+            local data=$(echo "$callback" | jq -r '.data // ""')
+            local callback_id=$(echo "$callback" | jq -r '.id // ""')
+            [[ -n "$chat_id" && -n "$message_id" && -n "$data" && -n "$callback_id" ]] && \
+                handle_callback "$chat_id" "$message_id" "$data" "$callback_id"
         fi
     done <<< "$result"
 }
 
 save_state() {
-    echo "LAST_UPDATE_ID=${LAST_UPDATE_ID}" > "$STATE_FILE"
+    echo "LAST_UPDATE_ID=${LAST_UPDATE_ID}" > "$STATE_FILE" 2>/dev/null || true
 }
 
 load_state() {
-    [[ -f "$STATE_FILE" ]] && source "$STATE_FILE"
+    [[ -f "$STATE_FILE" ]] && source "$STATE_FILE" 2>/dev/null || true
 }
 
 cleanup() {
+    log_bot "收到停止信号，保存状态..."
     save_state
     log_bot "Bot停止"
     exit 0
@@ -682,35 +746,55 @@ trap cleanup SIGTERM SIGINT
 
 # ===== 主程序 =====
 main() {
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    
     log_bot "========================================"
-    log_bot "SnapSync Bot v3.0 启动 (按钮交互版)"
+    log_bot "SnapSync Bot v3.0 启动"
     log_bot "主机: ${HOSTNAME}"
     log_bot "========================================"
     
     load_state
     
-    # 发送启动通知
+    # 发送启动通知（失败不影响运行）
     send_message_with_buttons "$TELEGRAM_CHAT_ID" "🤖 <b>Bot已启动</b>
 
 ⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
 
-点击下方按钮开始操作" "$(get_main_menu_keyboard)"
+点击下方按钮开始操作" "$(get_main_menu_keyboard)" || {
+        log_bot "启动通知发送失败，但继续运行"
+    }
+    
+    log_bot "进入主循环..."
     
     # 主循环
+    local error_count=0
+    local max_errors=10
+    
     while true; do
         if updates=$(get_updates); then
             process_updates "$updates"
+            error_count=0  # 重置错误计数
         else
-            log_bot "获取更新失败"
-            sleep 5
+            ((error_count++))
+            log_bot "获取更新失败（${error_count}/${max_errors}）"
+            
+            if (( error_count >= max_errors )); then
+                log_bot "连续失败次数过多，等待30秒后继续..."
+                sleep 30
+                error_count=0
+            else
+                sleep 5
+            fi
         fi
+        
         save_state
     done
 }
 
 # 检查依赖
 if ! command -v jq &>/dev/null; then
-    echo "错误: 需要安装 jq"
+    echo "错误: 需要安装 jq" >&2
+    echo "安装: apt-get install jq 或 yum install jq" >&2
     exit 1
 fi
 
