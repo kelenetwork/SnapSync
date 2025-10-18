@@ -1,286 +1,575 @@
-# SnapSync v2.5 增强版系统恢复工具
+# SnapSync v3.0 🚀
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-2.5-green.svg)
+<div align="center">
+
+![Version](https://img.shields.io/badge/version-3.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Shell](https://img.shields.io/badge/shell-bash-yellow.svg)
 
-一个功能强大、安全可靠的 Linux 系统快照恢复工具，支持多种恢复模式和高级特性。
+**专业级 Linux 系统无损快照与恢复工具**
 
-## 📋 目录
-- [特性概述](#-特性概述)
-- [系统要求](#-系统要求)
-- [安装指南](#-安装指南)
-- [配置说明](#-配置说明)
-- [使用方法](#-使用方法)
-- [恢复模式](#-恢复模式)
-- [高级特性](#-高级特性)
-- [故障排除](#-故障排除)
-- [最佳实践](#-最佳实践)
-- [更新日志](#-更新日志)
-- [路线图](#-路线图)
-- [详细使用示例](#-详细使用示例)
-- [高级配置](#-高级配置)
-- [故障恢复手册](#-故障恢复手册)
-- [测试与API](#-测试与api)
-- [安全审计](#-安全审计)
-- [致谢](#-致谢)
+[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [Telegram Bot](#-telegram-bot) • [常见问题](#-常见问题)
+
+</div>
 
 ---
 
-## 🚀 特性概述
+## 📋 功能特性
 
 ### 核心功能
-- **多种恢复方式**：本地快照、远程下载、手动指定文件
-- **智能恢复模式**：标准、完全、选择性恢复
-- **多格式支持**：.tar.gz、.tar.bz2、.tar.xz、.tar
-- **完整性验证**：SHA256 校验和自动验证
-- **配置保留**：智能保留网络、SSH 等关键配置
+✅ **无损备份恢复** - 完整保留文件权限、ACL、扩展属性  
+✅ **统一管理菜单** - 备份、恢复、配置一站式管理  
+✅ **智能依赖检测** - 自动识别并安装所需依赖  
+✅ **远程存储支持** - 可选上传至远程服务器  
+✅ **Telegram Bot 控制** - 远程管理快照和配置  
 
-### 增强特性
-- **ACL 权限恢复**
-- **扩展属性恢复**
-- **进度显示**
-- **Telegram 通知**
-- **错误回滚机制**
-
-### 安全特性
-- **多重确认**
-- **运行时检查**
-- **权限验证**
-- **配置备份**
+### 技术特性
+- **多线程压缩** - 使用 pigz 加速备份过程
+- **完整性验证** - SHA256 校验确保数据安全
+- **增量备份** - 支持基于时间戳的增量备份
+- **断点续传** - rsync 确保大文件传输可靠性
+- **资源智能调度** - 自动调整系统资源占用
 
 ---
 
-## 🔧 系统要求
+## 🚀 快速开始
 
-### 必需组件
-- bash (>= 4.0)
-- tar / gzip / bzip2 / xz-utils
-- curl / ssh / systemctl
-- root 权限
+### 一键安装
 
-### 可选增强组件
-- acl、attr、bc、pv
-
-### 支持的发行版
-- ✅ Ubuntu 18.04+
-- ✅ Debian 9+
-- ✅ CentOS 7+
-- ✅ RHEL 7+
-- ✅ Rocky Linux 8+
-- ✅ Arch Linux
-
----
-
-## 📦 安装指南（备份）
-
-### 方法一：Git 克隆
 ```bash
+# 克隆项目
 git clone https://github.com/kelenetwork/SnapSync.git
 cd SnapSync
-chmod +x SnapSync remote_restore
-./SnapSync
+
+# 赋予执行权限
+chmod +x snapsync.sh
+
+# 运行安装
+sudo ./snapsync.sh
 ```
 
-### 安装依赖（Ubuntu/Debian）
+### 系统要求
+
+- **操作系统**: Ubuntu 18.04+ / Debian 9+ / CentOS 7+ / RHEL 7+
+- **权限**: Root 或 sudo
+- **磁盘空间**: 建议至少系统空间的 2 倍
+- **网络**: (可选) 用于远程备份和 Telegram 通知
+
+### 自动安装的依赖
+
+安装脚本会自动检测并安装以下工具：
+
+**基础工具**: tar, gzip, curl, rsync, jq, bc  
+**压缩工具**: pigz (多线程), bzip2, xz-utils  
+**高级功能**: acl (ACL 支持), attr (扩展属性)  
+**可选工具**: sshpass (密码认证), pv (进度显示)
+
+---
+
+## 📖 使用指南
+
+### 主菜单
+
+运行主脚本后，你将看到统一的管理菜单：
+
 ```bash
-sudo apt update
-sudo apt install -y tar gzip bzip2 xz-utils curl openssh-client acl attr bc
+sudo ./snapsync.sh
 ```
 
-### 安装依赖（CentOS/RHEL）
+```
+╔════════════════════════════════════════════╗
+║       SnapSync v3.0 管理控制台            ║
+╚════════════════════════════════════════════╝
+
+1) 📸 创建系统快照
+2) 🔄 恢复系统快照
+3) ⚙️  配置管理
+4) 📊 查看快照列表
+5) 🤖 Telegram Bot 设置
+6) 🗑️  清理旧快照
+7) ❓ 帮助文档
+8) 🚪 退出
+
+请选择操作 [1-8]:
+```
+
+### 创建快照
+
+选择菜单项 `1` 创建快照：
+
+1. **自动模式**: 直接创建快照并根据配置决定是否上传
+2. **选择上传**: 可选择仅本地保存或同时上传到远程
+
 ```bash
-sudo yum install -y tar gzip bzip2 xz curl openssh-clients acl attr bc
+📸 创建系统快照
+━━━━━━━━━━━━━━━━━━━━━━━━━
+是否上传到远程服务器？[Y/n]:
+```
+
+快照特性：
+- ✅ 保留完整的文件权限和所有权
+- ✅ 保留 ACL (访问控制列表)
+- ✅ 保留扩展属性 (xattr)
+- ✅ 保留符号链接和硬链接
+- ✅ 自动生成 SHA256 校验和
+
+### 恢复快照
+
+选择菜单项 `2` 恢复系统：
+
+1. **本地恢复**: 从本地备份目录选择快照
+2. **远程恢复**: 从远程服务器下载并恢复
+
+```bash
+🔄 系统恢复
+━━━━━━━━━━━━━━━━━━━━━━━━━
+可用快照:
+1) system_snapshot_20250118.tar.gz (2.5GB, 2025-01-18 10:30)
+2) system_snapshot_20250117.tar.gz (2.4GB, 2025-01-17 08:15)
+
+恢复模式:
+1) 🛡️ 智能恢复 - 保留网络和SSH配置
+2) 🔧 完全恢复 - 恢复所有内容
+
+请选择快照 [1-2]:
+```
+
+### 配置管理
+
+选择菜单项 `3` 管理配置：
+
+```bash
+⚙️ 配置管理
+━━━━━━━━━━━━━━━━━━━━━━━━━
+1) 修改远程服务器配置
+2) 修改 Telegram 配置
+3) 修改保留策略
+4) 修改定时任务
+5) 查看当前配置
+6) 返回主菜单
+
+请选择 [1-6]:
+```
+
+配置文件位置: `/etc/snapsync/config.conf`
+
+---
+
+## 🤖 Telegram Bot
+
+### Bot 功能
+
+SnapSync 的 Telegram Bot 不仅用于通知，还能远程管理：
+
+**通知功能**:
+- 📸 快照创建开始/完成通知
+- ⬆️ 上传进度和结果通知
+- ❌ 错误和警告提醒
+- 📊 定期状态报告
+
+**控制功能**:
+- `/status` - 查看系统状态
+- `/list` - 列出所有快照
+- `/create` - 创建新快照
+- `/delete <id>` - 删除指定快照
+- `/config` - 查看配置
+- `/setconfig <key> <value>` - 修改配置
+- `/help` - 查看帮助
+
+### Bot 设置
+
+1. **创建 Telegram Bot**:
+   - 在 Telegram 中找到 @BotFather
+   - 发送 `/newbot` 创建新 bot
+   - 获取 Bot Token
+
+2. **获取 Chat ID**:
+   - 向你的 bot 发送任意消息
+   - 访问 `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
+   - 在返回的 JSON 中找到 `chat.id`
+
+3. **配置 Bot**:
+   ```bash
+   sudo ./snapsync.sh
+   # 选择: 5) Telegram Bot 设置
+   ```
+
+4. **启动 Bot 服务**:
+   ```bash
+   systemctl enable snapsync-bot
+   systemctl start snapsync-bot
+   ```
+
+### Bot 使用示例
+
+```
+你: /status
+Bot: 
+📊 系统状态
+━━━━━━━━━━━━━━━━
+主机: server-01
+快照总数: 5 个
+最新快照: system_snapshot_20250118.tar.gz
+快照大小: 2.5GB
+磁盘使用: 45%
+下次备份: 2025-01-19 10:00
+
+你: /list
+Bot:
+📋 快照列表
+━━━━━━━━━━━━━━━━
+1. system_snapshot_20250118.tar.gz
+   大小: 2.5GB | 2025-01-18 10:30
+   
+2. system_snapshot_20250117.tar.gz
+   大小: 2.4GB | 2025-01-17 08:15
+
+你: /delete 2
+Bot: 
+🗑️ 快照删除确认
+确认删除快照 system_snapshot_20250117.tar.gz?
+回复 /confirm_delete_2 确认删除
+
+你: /confirm_delete_2
+Bot: ✅ 快照已删除
 ```
 
 ---
-## 📦 安装指南（恢复）
 
-### 方法一：Git 克隆
-```bash
-git clone https://github.com/kelenetwork/SnapSync.git
-cd SnapSync
-chmod +x SnapSync remote_restore
-./remote_restore
+## 📂 目录结构
+
+```
+/etc/snapsync/              # 配置目录
+├── config.conf             # 主配置文件
+└── bot_config.conf         # Bot 配置文件
+
+/var/log/snapsync/          # 日志目录
+├── backup.log              # 备份日志
+├── restore.log             # 恢复日志
+└── bot.log                 # Bot 日志
+
+/opt/snapsync/              # 程序目录
+├── snapsync.sh             # 主脚本
+├── modules/                # 功能模块
+│   ├── backup.sh
+│   ├── restore.sh
+│   ├── config.sh
+│   └── telegram.sh
+└── bot/                    # Bot 服务
+    └── telegram_bot.sh
+
+<本地备份目录>/             # 默认 /backups
+├── system_snapshots/       # 快照文件
+├── metadata/               # 元数据
+└── checksums/              # 校验和
 ```
 
+---
 
 ## ⚙️ 配置说明
 
-首次运行会在 `/etc/snapsync/config.conf` 生成配置：
+### 主配置文件
+
+`/etc/snapsync/config.conf`:
+
 ```bash
-TARGET_IP="192.168.1.100"
-TARGET_USER="root"
-SSH_PORT="22"
-REMOTE_BASE_PATH="/opt/system_backups"
-BACKUP_DIR="/opt/system_backups"
-TELEGRAM_BOT_TOKEN="your_bot_token"
-TELEGRAM_CHAT_ID="your_chat_id"
-VERIFY_CHECKSUMS="true"
-PRESERVE_ACL="true"
-PRESERVE_XATTR="true"
-DEBUG_MODE="false"
+# Telegram 配置
+TELEGRAM_BOT_TOKEN="your_bot_token_here"
+TELEGRAM_CHAT_ID="your_chat_id_here"
+
+# 远程服务器配置
+REMOTE_ENABLED="true"
+REMOTE_HOST="192.168.1.100"
+REMOTE_USER="root"
+REMOTE_PORT="22"
+REMOTE_PATH="/backups/server-01"
+
+# 备份配置
+BACKUP_DIR="/backups"
+COMPRESSION_LEVEL="6"
+PARALLEL_THREADS="auto"
+
+# 保留策略
+LOCAL_KEEP_COUNT="5"
+REMOTE_KEEP_DAYS="30"
+
+# 定时任务
+AUTO_BACKUP_ENABLED="true"
+BACKUP_INTERVAL="7d"
+BACKUP_TIME="03:00"
+```
+
+### 修改配置
+
+**方法 1 - 通过菜单**:
+```bash
+sudo ./snapsync.sh
+# 选择: 3) 配置管理
+```
+
+**方法 2 - 编辑文件**:
+```bash
+sudo nano /etc/snapsync/config.conf
+# 修改后重启服务
+sudo systemctl restart snapsync.timer
+```
+
+**方法 3 - 通过 Telegram Bot**:
+```
+/setconfig BACKUP_INTERVAL 3d
 ```
 
 ---
 
-## 📖 使用方法
+## 🔧 高级功能
 
-### 基本用法
+### 手动触发备份
+
 ```bash
-sudo ./remote_restore.sh       # 交互式恢复
-./remote_restore.sh --help     # 查看帮助
-./remote_restore.sh --check    # 检查系统状态
-./remote_restore.sh --config   # 查看配置
+# 立即创建快照（使用配置的上传设置）
+sudo systemctl start snapsync-backup
+
+# 或通过主脚本
+sudo ./snapsync.sh
+# 选择: 1) 创建系统快照
 ```
 
-### 恢复流程
-1. 选择恢复方式：本地 / 远程 / 手动指定
-2. 选择恢复模式：标准 / 完全 / 选择性
-3. 确认并执行，实时显示进度
+### 查看日志
 
----
-
-## 🔄 恢复模式
-
-- **标准模式**（推荐）：保留网络、SSH、主机名等配置  
-- **完全模式**（谨慎）：覆盖所有文件，适合灾难恢复  
-- **选择性模式**：仅恢复指定目录（如 `/home`、`/etc` 等）
-
----
-
-## 🌟 高级特性
-
-- ACL & 扩展属性恢复  
-- 校验和完整性验证  
-- 实时进度监控  
-- Telegram 通知推送
-
----
-
-## 🔍 故障排除
-
-- 权限不足 → 使用 `sudo`  
-- 网络错误 → 测试 SSH 连接  
-- 磁盘空间不足 → 清理临时文件或扩容  
-- 快照损坏 → 校验或重新下载
-
-日志位置：  
-- 主日志 `/var/log/system_snapshot/restore.log`  
-- 调试日志 `/var/log/system_snapshot/restore_debug.log`  
-
----
-
-## 💡 最佳实践
-
-- 恢复前确认快照完整性  
-- 确保磁盘空间 & 网络稳定  
-- 在测试环境验证流程  
-- 配置 Telegram 通知监控恢复状态  
-
----
-
-## 📊 路线图
-
-### v2.6
-- [ ] GUI 界面
-- [ ] 增量恢复
-- [ ] 多目标并行恢复
-- [ ] 云存储集成
-- [ ] 恢复策略模板
-- [ ] 性能基准工具
-
-### v3.0
-- [ ] 容器化部署
-- [ ] REST API
-- [ ] Web 管理界面
-- [ ] 集群恢复
-- [ ] AI 辅助诊断
-
----
-
-## 📚 详细使用示例
-
-### 示例1：标准生产恢复
 ```bash
-sudo ./remote_restore.sh
-选择：2（远程下载）
-选择快照：system_snapshot_xxx.tar.gz
-选择模式：1（标准恢复）
-输入：yes
+# 备份日志
+tail -f /var/log/snapsync/backup.log
+
+# 恢复日志
+tail -f /var/log/snapsync/restore.log
+
+# Bot 日志
+tail -f /var/log/snapsync/bot.log
 ```
 
-### 示例2：选择性恢复
+### 定时任务管理
+
 ```bash
-sudo ./remote_restore.sh
-选择：1（本地快照恢复）
-选择模式：3（选择性恢复）
-勾选 /var/www /etc/mysql /var/lib/mysql
+# 查看状态
+systemctl status snapsync.timer
+
+# 查看下次运行时间
+systemctl list-timers snapsync.timer
+
+# 禁用自动备份
+systemctl disable snapsync.timer
+
+# 启用自动备份
+systemctl enable snapsync.timer
 ```
 
-### 示例3：灾难恢复
+### 快照清理
+
 ```bash
-sudo ./remote_restore.sh
-选择：2（远程下载最新快照）
-选择模式：2（完全恢复）
-输入：yes → CONFIRM → yes
+# 通过菜单清理
+sudo ./snapsync.sh
+# 选择: 6) 清理旧快照
+
+# 手动清理本地
+find /backups/system_snapshots -name "*.tar.gz" -mtime +30 -delete
+
+# 通过 Telegram Bot
+/delete <snapshot_id>
 ```
 
 ---
 
-## 🔧 高级配置
+## 🛠️ 故障排除
 
-- **SSH 密钥认证**：支持免密登录  
-- **自定义保留路径**：通过 `PRESERVE_PATHS` 设置  
-- **排除规则**：通过 `EXCLUDE_PATTERNS` 配置  
-- **性能调优**：支持并行压缩、网络优化参数
+### 常见问题
+
+**问题: 权限不足**
+```bash
+错误: 请使用 root 权限运行
+解决: sudo ./snapsync.sh
+```
+
+**问题: SSH 连接失败**
+```bash
+错误: 无法连接远程服务器
+解决: 
+1. 检查 SSH 配置: ssh user@host -p port
+2. 确认密钥或密码正确
+3. 检查防火墙设置
+```
+
+**问题: 磁盘空间不足**
+```bash
+错误: 磁盘空间不足
+解决:
+1. 清理旧快照
+2. 增加磁盘空间
+3. 修改 BACKUP_DIR 到更大的分区
+```
+
+**问题: Telegram 通知失败**
+```bash
+错误: Telegram 通知发送失败
+解决:
+1. 验证 Bot Token 和 Chat ID
+2. 检查网络连接
+3. 测试: curl https://api.telegram.org/bot<TOKEN>/getMe
+```
+
+### 日志分析
+
+```bash
+# 查看最近的错误
+grep ERROR /var/log/snapsync/backup.log | tail -20
+
+# 查看特定时间段的日志
+grep "2025-01-18" /var/log/snapsync/backup.log
+
+# 查看成功的备份
+grep "备份完成" /var/log/snapsync/backup.log
+```
+
+### 恢复测试
+
+建议在虚拟机或测试环境中验证恢复流程：
+
+```bash
+# 1. 创建测试快照
+sudo ./snapsync.sh
+# 选择: 1) 创建系统快照
+
+# 2. 记录系统状态
+df -h > /tmp/before_restore.txt
+ls -la /etc > /tmp/etc_before.txt
+
+# 3. 执行恢复测试
+sudo ./snapsync.sh
+# 选择: 2) 恢复系统快照
+
+# 4. 验证恢复结果
+diff /tmp/before_restore.txt <(df -h)
+```
 
 ---
 
-## 📋 故障恢复手册
+## 📊 性能优化
 
-- 网络中断 → 断点续传 `rsync --partial`  
-- 磁盘不足 → 清理临时文件 & 扩容  
-- 恢复失败 → 使用回滚点 `/var/backups/system_config_backup_*`  
+### 压缩级别调整
+
+```bash
+# 更快的备份（压缩率低）
+COMPRESSION_LEVEL="1"
+
+# 平衡模式（推荐）
+COMPRESSION_LEVEL="6"
+
+# 更高压缩率（速度慢）
+COMPRESSION_LEVEL="9"
+```
+
+### 并行线程
+
+```bash
+# 自动检测（推荐）
+PARALLEL_THREADS="auto"
+
+# 手动指定
+PARALLEL_THREADS="4"
+```
+
+### 排除目录
+
+编辑备份脚本的排除列表以加快速度：
+
+```bash
+# 在 /opt/snapsync/modules/backup.sh 中添加
+EXCLUDE_DIRS+=(
+    "var/cache/apt"
+    "var/tmp"
+    "home/*/.cache"
+)
+```
 
 ---
 
-## 🧪 测试与 API
+## 🔐 安全建议
 
-- **单元测试**：`./tests/run_tests.sh`  
-- **集成测试**：`./tests/e2e/test_complete_restore.sh`  
-- **API**：
-  - `execute_standard_restore`  
-  - `execute_selective_restore`  
-  - `verify_snapshot_integrity`  
+1. **保护配置文件**:
+   ```bash
+   chmod 600 /etc/snapsync/config.conf
+   ```
+
+2. **使用 SSH 密钥认证**:
+   ```bash
+   ssh-keygen -t ed25519
+   ssh-copy-id user@remote-host
+   ```
+
+3. **加密敏感数据**:
+   ```bash
+   # 使用 gpg 加密快照
+   gpg --encrypt --recipient your@email.com snapshot.tar.gz
+   ```
+
+4. **定期验证备份**:
+   ```bash
+   # 验证校验和
+   sha256sum -c snapshot.tar.gz.sha256
+   ```
 
 ---
 
-## 🔒 安全审计
+## 🔄 更新日志
 
-- 权限检查：`./security/audit_permissions.sh`  
-- 配置安全：`./security/check_config_security.sh`  
-- 漏洞扫描：`./security/vulnerability_scan.sh`  
+### v3.0 (2025-01-18)
+- ✨ 统一管理菜单系统
+- 🤖 增强 Telegram Bot 控制功能
+- 🔧 自动依赖检测和安装
+- 📸 简化快照创建流程
+- 🛡️ 默认无损备份恢复
+- 📊 改进配置管理界面
+
+### v2.5 (2024-12-15)
+- 增量备份支持
+- ACL 和扩展属性保留
+- 多线程压缩优化
+- 完整性验证机制
 
 ---
 
-## 🎉 致谢
+## 🤝 贡献
 
-感谢所有为 **SnapSync** 做出贡献的开发者和用户！  
-特别感谢核心团队、测试用户、开源社区反馈，以及 Linux 发行版维护者。  
+欢迎提交 Issue 和 Pull Request！
+
+1. Fork 项目
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启 Pull Request
 
 ---
 
-- 🐛 问题反馈：[GitHub Issues](https://github.com/kelenetwork/snapsync/issues)  
-- 💬 讨论交流：[GitHub Discussions](https://github.com/kelenetwork/snapsync/discussions)  
-- 📧 邮件支持：snapsync-support@kele.my  
+## 📄 许可证
+
+本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情
+
+---
+
+## 📞 支持
+
+- 🐛 问题反馈: [GitHub Issues](https://github.com/kelenetwork/snapsync/issues)
+- 💬 讨论交流: [GitHub Discussions](https://github.com/kelenetwork/snapsync/discussions)
+- 📧 邮件支持: snapsync-support@kele.my
+- 📖 文档: [Wiki](https://github.com/kelenetwork/snapsync/wiki)
+
+---
 
 <div align="center">
-  <p><strong>SnapSync - 让系统恢复变得简单可靠</strong></p>
-  <p>
-    <a href="https://github.com/kelenetwork/snapsync">GitHub 仓库</a> •
-    <a href="https://github.com/kelenetwork/snapsync/wiki">文档</a> •
-    <a href="https://github.com/kelenetwork/snapsync/GitHub">下载</a>
-  </p>
-  <p><sub>© 2024 SnapSync Development Team. MIT License.</sub></p>
+
+**SnapSync v3.0** - 让系统快照变得简单、安全、可靠
+
+Made with ❤️ by [Kele Network](https://github.com/kelenetwork)
+
+[⬆ 回到顶部](#snapsync-v30-)
+
 </div>
