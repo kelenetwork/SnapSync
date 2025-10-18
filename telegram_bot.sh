@@ -295,12 +295,18 @@ handle_menu_list() {
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
     
-    # 使用数组安全读取
+    # 使用 ls + grep 排除 .sha256 文件（修复版）
     local snapshots=()
     if [[ -d "$snapshot_dir" ]]; then
-        while IFS= read -r -d '' file; do
-            snapshots+=("$file")
-        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+        if cd "$snapshot_dir" 2>/dev/null; then
+            while IFS= read -r file; do
+                # 确保是文件且不是 .sha256
+                if [[ -f "$file" && "$file" != *.sha256 ]]; then
+                    snapshots+=("$snapshot_dir/$file")
+                fi
+            done < <(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$')
+            cd - >/dev/null
+        fi
     fi
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
@@ -343,6 +349,62 @@ handle_menu_list() {
     
     edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
 }
+
+handle_menu_delete() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "加载快照..."
+    
+    local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
+    
+    # 使用 ls + grep 排除 .sha256 文件（修复版）
+    local snapshots=()
+    if [[ -d "$snapshot_dir" ]]; then
+        if cd "$snapshot_dir" 2>/dev/null; then
+            while IFS= read -r file; do
+                # 确保是文件且不是 .sha256
+                if [[ -f "$file" && "$file" != *.sha256 ]]; then
+                    snapshots+=("$snapshot_dir/$file")
+                fi
+            done < <(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$')
+            cd - >/dev/null
+        fi
+    fi
+    
+    if [[ ${#snapshots[@]} -eq 0 ]]; then
+        local message="🗑️ <b>删除快照</b>
+
+暂无可删除的快照"
+        edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+        return
+    fi
+    
+    # 构建快照选择按钮
+    local buttons="["
+    local count=0
+    for i in "${!snapshots[@]}"; do
+        (( count >= 5 )) && break
+        
+        local file="${snapshots[$i]}"
+        local name=$(basename "$file")
+        local short_name="${name:17:14}"
+        
+        buttons+="{\"text\": \"$((i+1)). ${short_name}\", \"callback_data\": \"delete_${i}\"},"
+        ((count++))
+    done
+    buttons="${buttons%,}]"
+    
+    local keyboard="{\"inline_keyboard\":[$buttons,[{\"text\":\"🔙 返回\",\"callback_data\":\"menu_main\"}]]}"
+    
+    local message="🗑️ <b>删除快照</b>
+
+选择要删除的快照:
+
+<i>点击快照编号确认删除</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
 
 handle_menu_create() {
     local chat_id="$1"
@@ -462,11 +524,17 @@ handle_delete_snapshot() {
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
     
+    # 使用相同方法读取快照列表
     local snapshots=()
     if [[ -d "$snapshot_dir" ]]; then
-        while IFS= read -r -d '' file; do
-            snapshots+=("$file")
-        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+        if cd "$snapshot_dir" 2>/dev/null; then
+            while IFS= read -r file; do
+                if [[ -f "$file" && "$file" != *.sha256 ]]; then
+                    snapshots+=("$snapshot_dir/$file")
+                fi
+            done < <(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$')
+            cd - >/dev/null
+        fi
     fi
     
     if [[ ! "$snapshot_id" =~ ^[0-9]+$ ]] || (( snapshot_id >= ${#snapshots[@]} )); then
@@ -505,16 +573,23 @@ handle_confirm_delete() {
     
     local snapshot_dir="${BACKUP_DIR:-/backups}/system_snapshots"
     
+    # 使用相同方法读取快照列表
     local snapshots=()
     if [[ -d "$snapshot_dir" ]]; then
-        while IFS= read -r -d '' file; do
-            snapshots+=("$file")
-        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+        if cd "$snapshot_dir" 2>/dev/null; then
+            while IFS= read -r file; do
+                if [[ -f "$file" && "$file" != *.sha256 ]]; then
+                    snapshots+=("$snapshot_dir/$file")
+                fi
+            done < <(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$')
+            cd - >/dev/null
+        fi
     fi
     
     local file="${snapshots[$snapshot_id]}"
     local name=$(basename "$file")
     
+    # 删除快照及其 .sha256 文件
     if rm -f "$file" "${file}.sha256" 2>/dev/null; then
         log_bot "快照已删除: ${name}"
         
@@ -533,7 +608,6 @@ handle_confirm_delete() {
         edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
     fi
 }
-
 handle_menu_config() {
     local chat_id="$1"
     local message_id="$2"
