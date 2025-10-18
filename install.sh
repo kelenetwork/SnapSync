@@ -186,6 +186,14 @@ copy_program_files() {
         log "${GREEN}  ✓ telegram_bot.sh${NC}"
     fi
     
+    # 复制诊断工具
+    if [[ -f "$script_dir/telegram-test.sh" ]]; then
+        cp "$script_dir/telegram-test.sh" "$INSTALL_DIR/scripts/"
+        chmod +x "$INSTALL_DIR/scripts/telegram-test.sh"
+        ln -sf "$INSTALL_DIR/scripts/telegram-test.sh" /usr/local/bin/telegram-test
+        log "${GREEN}  ✓ telegram-test.sh${NC}"
+    fi
+    
     log "${GREEN}✓ 程序文件复制完成${NC}\n"
 }
 
@@ -458,6 +466,7 @@ finish_installation() {
     echo -e "  ${GREEN}snapsync${NC}         - 管理控制台"
     echo -e "  ${GREEN}snapsync-backup${NC}  - 创建快照"
     echo -e "  ${GREEN}snapsync-restore${NC} - 恢复快照"
+    echo -e "  ${GREEN}telegram-test${NC}    - 测试Telegram通知"
     echo ""
     
     echo -e "${CYAN}快速开始:${NC}"
@@ -471,8 +480,8 @@ main() {
     show_banner
     detect_system
     install_dependencies
-    run_config_wizard
-    create_directories
+    create_directories     # ← 先创建目录
+    run_config_wizard      # ← 再运行配置向导
     copy_program_files
     setup_systemd_services
     create_shortcuts
