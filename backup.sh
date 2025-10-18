@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 无损备份模块（已修复）
-# 修复: 移除readonly冲突，改进配置加载
+# SnapSync v3.0 - 备份模块（修复通知 + 多VPS支持）
+# 修复：Telegram通知功能
+# 新增：多VPS识别
 
 set -euo pipefail
 
-# ===== 路径定义（不使用readonly）=====
+# ===== 路径定义 =====
 CONFIG_FILE="/etc/snapsync/config.conf"
 LOG_FILE="/var/log/snapsync/backup.log"
 LOCK_FILE="/var/run/snapsync-backup.lock"
@@ -17,7 +18,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# ===== 初始化日志 =====
+# ===== 初始化 =====
 mkdir -p "$(dirname "$LOG_FILE")"
 
 # ===== 工具函数 =====
@@ -33,15 +34,106 @@ log_success() {
     echo -e "$(date '+%F %T') ${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-# Telegram通知
+# Telegram通知（修复版）
 send_telegram() {
-    [[ "${TELEGRAM_ENABLED:-}" != "Y" && "${TELEGRAM_ENABLED:-}" != "true" ]] && return 0
-    [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
+    local message="$1"
     
-    curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    # 详细检查Telegram配置
+    if [[ "${TELEGRAM_ENABLED:-false}" != "Y" && "${TELEGRAM_ENABLED:-false}" != "true" ]]; then
+        log_info "[TG] Telegram未启用 (TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-未设置})"
+        return 0
+    fi
+    
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        log_error "[TG] BOT_TOKEN未设置"
+        return 1
+    fi
+    
+    if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+        log_error "[TG] CHAT_ID未设置"
+        return 1
+    fi
+    
+    # 添加VPS标识（支持多VPS管理）
+    local hostname="${HOSTNAME:-$(hostname)}"
+    local vps_tag="🖥️ <b>${hostname}</b>"
+    local full_message="${vps_tag}
+
+${message}"
+    
+    log_info "[TG] 发送通知..."
+    
+    # 发送消息
+    local response=$(curl -sS -m 15 -X POST \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=$1" \
-        -d "parse_mode=HTML" &>/dev/null || true
+        --data-urlencode "text=${full_message}" \
+        -d "parse_mode=HTML" \
+        -d "disable_web_page_preview=true" 2>&1)
+    
+    # 检查结果
+    if echo "$response" | grep -q '"ok":true'; then
+        log_success "[TG] 通知发送成功"
+        return 0
+    else
+        log_error "[TG] 通知发送失败: $response"
+        return 1
+    fi
+}
+
+# 测试Telegram连接
+test_telegram() {
+    log_info "${CYAN}测试 Telegram 连接...${NC}"
+    
+    if [[ "${TELEGRAM_ENABLED:-false}" != "Y" && "${TELEGRAM_ENABLED:-false}" != "true" ]]; then
+        log_info "Telegram未启用，跳过测试"
+        return 0
+    fi
+    
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+        log_error "Telegram配置不完整"
+        echo ""
+        echo "当前配置:"
+        echo "  TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-未设置}"
+        echo "  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:20}... (${#TELEGRAM_BOT_TOKEN} 字符)"
+        echo "  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-未设置}"
+        echo ""
+        return 1
+    fi
+    
+    # 测试API
+    log_info "测试 Bot API..."
+    local test_response=$(curl -sS -m 10 \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>&1)
+    
+    if echo "$test_response" | grep -q '"ok":true'; then
+        local bot_name=$(echo "$test_response" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+        log_success "Bot连接成功: @${bot_name}"
+        
+        # 发送测试消息
+        log_info "发送测试消息..."
+        if send_telegram "🔍 <b>连接测试</b>
+
+✅ Telegram通知功能正常
+⏰ 测试时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+备份任务将发送通知到此会话"; then
+            log_success "测试消息发送成功！"
+            return 0
+        else
+            log_error "测试消息发送失败"
+            return 1
+        fi
+    else
+        log_error "Bot API测试失败: $test_response"
+        echo ""
+        echo "可能的原因："
+        echo "  1. Bot Token 错误"
+        echo "  2. Bot 被删除"
+        echo "  3. 网络连接问题"
+        echo ""
+        return 1
+    fi
 }
 
 # 字节格式化
@@ -65,6 +157,10 @@ acquire_lock() {
     exec 200>"$LOCK_FILE"
     if ! flock -n 200; then
         log_error "备份进程已在运行"
+        send_telegram "⚠️ <b>备份跳过</b>
+
+原因: 上一个备份任务仍在运行
+时间: $(date '+%Y-%m-%d %H:%M:%S')"
         exit 1
     fi
     echo $$ >&200
@@ -81,11 +177,9 @@ trap release_lock EXIT
 load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         log_error "配置文件不存在: $CONFIG_FILE"
-        log_info "请先运行安装脚本"
         exit 1
     fi
     
-    # 安全加载配置（避免语法错误）
     if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
         log_error "配置文件语法错误"
         exit 1
@@ -101,6 +195,13 @@ load_config() {
     ENABLE_ACL="${ENABLE_ACL:-true}"
     ENABLE_XATTR="${ENABLE_XATTR:-true}"
     ENABLE_VERIFICATION="${ENABLE_VERIFICATION:-true}"
+    HOSTNAME="${HOSTNAME:-$(hostname)}"
+    
+    # 显示配置摘要
+    log_info "配置加载完成"
+    log_info "  主机: $HOSTNAME"
+    log_info "  备份目录: $BACKUP_DIR"
+    log_info "  Telegram: ${TELEGRAM_ENABLED:-false}"
 }
 
 # ===== 系统检查 =====
@@ -114,12 +215,16 @@ check_system_resources() {
         log_error "磁盘空间不足: ${disk_usage}%"
         send_telegram "❌ <b>备份失败</b>
 
-💾 磁盘使用: ${disk_usage}%
-🖥️ 主机: ${HOSTNAME:-$(hostname)}"
+💾 磁盘使用率: ${disk_usage}%
+⚠️ 阈值: ${DISK_THRESHOLD:-90}%
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+请清理磁盘空间后重试"
         return 1
     fi
     
-    log_info "磁盘使用: ${disk_usage}%"
+    local disk_free=$(df -h "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+    log_info "磁盘状态: 使用率 ${disk_usage}%, 可用 ${disk_free}"
     return 0
 }
 
@@ -136,10 +241,14 @@ create_snapshot() {
     log_info "${CYAN}开始创建系统快照${NC}"
     log_info "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
+    # 发送开始通知
     send_telegram "🔄 <b>开始备份</b>
 
-📸 快照: ${snapshot_name}
-🖥️ 主机: ${HOSTNAME:-$(hostname)}"
+📸 快照名称: ${snapshot_name}
+📂 备份目录: ${BACKUP_DIR}
+⏰ 开始时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+备份进行中，请稍候..."
     
     check_system_resources || return 1
     
@@ -151,7 +260,9 @@ create_snapshot() {
         local threads="${PARALLEL_THREADS}"
         [[ "$threads" == "auto" ]] && threads=$(nproc)
         compress_cmd="pigz -${COMPRESSION_LEVEL} -p ${threads}"
-        log_info "使用 pigz (级别:${COMPRESSION_LEVEL}, 线程:${threads})"
+        log_info "使用 pigz 多线程压缩 (级别:${COMPRESSION_LEVEL}, 线程:${threads})"
+    else
+        log_info "使用 gzip 压缩 (级别:${COMPRESSION_LEVEL})"
     fi
     
     local snapshot_file="${snapshot_dir}/${snapshot_name}.tar${compress_ext}"
@@ -168,16 +279,17 @@ create_snapshot() {
         "--warning=no-file-removed"
     )
     
-    [[ "${ENABLE_ACL}" == "true" ]] && command -v getfacl &>/dev/null && tar_opts+=("--acls")
-    [[ "${ENABLE_XATTR}" == "true" ]] && command -v getfattr &>/dev/null && tar_opts+=("--xattrs" "--xattrs-include=*")
-    [[ -f /etc/selinux/config ]] && tar_opts+=("--selinux")
+    [[ "${ENABLE_ACL}" == "true" ]] && command -v getfacl &>/dev/null && tar_opts+=("--acls") && log_info "✓ ACL支持"
+    [[ "${ENABLE_XATTR}" == "true" ]] && command -v getfattr &>/dev/null && tar_opts+=("--xattrs" "--xattrs-include=*") && log_info "✓ 扩展属性支持"
+    [[ -f /etc/selinux/config ]] && tar_opts+=("--selinux") && log_info "✓ SELinux支持"
     
     # 排除列表
     local exclude_patterns=(
         "dev/*" "proc/*" "sys/*" "tmp/*" "run/*"
         "mnt/*" "media/*" "lost+found"
         "${BACKUP_DIR}/*"
-        "*.log" "*.tmp" "*.swp"
+        "*.log" "*.tmp" "*.swp" "swap*"
+        ".cache/*"
     )
     
     for pattern in "${exclude_patterns[@]}"; do
@@ -191,16 +303,34 @@ create_snapshot() {
         [[ -d "/$dir" ]] && valid_dirs+=("$dir")
     done
     
-    log_info "开始创建归档 (${#valid_dirs[@]} 个目录)..."
+    log_info "开始创建归档 (${#valid_dirs[@]} 个目录: ${valid_dirs[*]})..."
     
     # 执行备份
     cd / && {
         if tar "${tar_opts[@]}" "${valid_dirs[@]}" 2>/tmp/backup_err.log | $compress_cmd > "$temp_file"; then
-            [[ ! -s "$temp_file" ]] && log_error "快照文件为空" && rm -f "$temp_file" && return 1
+            if [[ ! -s "$temp_file" ]]; then
+                log_error "快照文件为空"
+                rm -f "$temp_file"
+                send_telegram "❌ <b>备份失败</b>
+
+原因: 生成的快照文件为空
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+请检查日志: $LOG_FILE"
+                return 1
+            fi
             mv "$temp_file" "$snapshot_file"
         else
-            log_error "tar失败: $(cat /tmp/backup_err.log 2>/dev/null)"
+            local tar_error=$(cat /tmp/backup_err.log 2>/dev/null | tail -5)
+            log_error "tar失败: $tar_error"
             rm -f "$temp_file"
+            send_telegram "❌ <b>备份失败</b>
+
+原因: tar 归档失败
+错误: ${tar_error:0:200}
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+请检查日志: $LOG_FILE"
             return 1
         fi
     }
@@ -211,18 +341,35 @@ create_snapshot() {
     local size_human=$(format_bytes "$size")
     
     log_success "快照创建成功"
-    log_info "大小: $size_human | 耗时: ${duration}秒"
+    log_info "  文件: $(basename "$snapshot_file")"
+    log_info "  大小: $size_human"
+    log_info "  耗时: ${duration}秒"
     
     # 生成校验和
     if [[ "${ENABLE_VERIFICATION}" == "true" ]]; then
+        log_info "生成校验和..."
         sha256sum "$snapshot_file" > "${snapshot_file}.sha256"
-        log_info "✓ 已生成校验和"
+        local checksum=$(cut -d' ' -f1 "${snapshot_file}.sha256")
+        log_info "✓ SHA256: ${checksum:0:16}..."
+    fi
+    
+    # 发送成功通知（详细信息）
+    local speed="N/A"
+    if (( duration > 0 )); then
+        local speed_bps=$((size / duration))
+        speed=$(format_bytes "$speed_bps")/s
     fi
     
     send_telegram "✅ <b>备份完成</b>
 
-📦 大小: $size_human
-⏱️ 耗时: ${duration}秒"
+📸 快照名称: $(basename "$snapshot_file")
+📦 文件大小: $size_human
+⏱️ 备份耗时: ${duration}秒
+⚡ 平均速度: $speed
+✓ 校验和: 已生成
+⏰ 完成时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+快照已保存到: $snapshot_dir"
     
     echo "$snapshot_file"
 }
@@ -232,7 +379,19 @@ upload_to_remote() {
     local snapshot_file="$1"
     [[ ! -f "$snapshot_file" ]] && log_error "快照不存在" && return 1
     
-    log_info "${CYAN}开始上传到远程${NC}"
+    log_info "${CYAN}开始上传到远程服务器${NC}"
+    
+    local snapshot_name=$(basename "$snapshot_file")
+    local size=$(format_bytes "$(stat -c%s "$snapshot_file" 2>/dev/null || echo 0)")
+    
+    send_telegram "⬆️ <b>开始上传</b>
+
+📦 文件: ${snapshot_name}
+📊 大小: ${size}
+🌐 服务器: ${REMOTE_HOST}
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+上传进行中..."
     
     local ssh_key="/root/.ssh/id_ed25519"
     local ssh_opts="-o ConnectTimeout=30 -o StrictHostKeyChecking=no"
@@ -240,6 +399,16 @@ upload_to_remote() {
     # 测试连接
     if ! ssh -i "$ssh_key" -p "$REMOTE_PORT" $ssh_opts "${REMOTE_USER}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
         log_error "无法连接远程服务器"
+        send_telegram "❌ <b>上传失败</b>
+
+原因: 无法连接到远程服务器
+🌐 服务器: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT}
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+请检查：
+• SSH密钥配置
+• 网络连接
+• 远程服务器状态"
         return 1
     fi
     
@@ -248,20 +417,52 @@ upload_to_remote() {
         "mkdir -p '${REMOTE_PATH}/system_snapshots'" || true
     
     # 上传
-    if rsync -avz --partial -e "ssh -i $ssh_key -p $REMOTE_PORT $ssh_opts" \
+    local upload_start=$(date +%s)
+    
+    if rsync -avz --partial --progress \
+            -e "ssh -i $ssh_key -p $REMOTE_PORT $ssh_opts" \
             "$snapshot_file" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/system_snapshots/" \
             2>&1 | tee -a "$LOG_FILE"; then
+        
+        local upload_duration=$(($(date +%s) - upload_start))
+        local upload_speed="N/A"
+        
+        if (( upload_duration > 0 )); then
+            local file_size=$(stat -c%s "$snapshot_file")
+            local speed_bps=$((file_size / upload_duration))
+            upload_speed=$(format_bytes "$speed_bps")/s
+        fi
+        
         log_success "上传完成"
+        log_info "  耗时: ${upload_duration}秒"
+        log_info "  速度: $upload_speed"
         
         # 上传校验和
         [[ -f "${snapshot_file}.sha256" ]] && \
             rsync -az -e "ssh -i $ssh_key -p $REMOTE_PORT $ssh_opts" \
                 "${snapshot_file}.sha256" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/system_snapshots/" || true
         
-        send_telegram "✅ <b>上传完成</b>"
+        send_telegram "✅ <b>上传完成</b>
+
+📦 文件: ${snapshot_name}
+⏱️ 上传耗时: ${upload_duration}秒
+⚡ 上传速度: $upload_speed
+🌐 目标: ${REMOTE_HOST}:${REMOTE_PATH}
+⏰ 完成时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+远程备份已完成"
+        
         clean_remote_snapshots
     else
         log_error "上传失败"
+        send_telegram "❌ <b>上传失败</b>
+
+📦 文件: ${snapshot_name}
+🌐 服务器: ${REMOTE_HOST}
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+本地备份已完成，但远程上传失败
+请检查网络连接和远程服务器状态"
         return 1
     fi
 }
@@ -275,11 +476,16 @@ clean_local_snapshots() {
     local keep=${LOCAL_KEEP_COUNT:-5}
     
     if (( total > keep )); then
+        local removed=0
         for ((i=keep; i<total; i++)); do
-            log_info "  删除: $(basename "${snapshots[$i]}")"
-            rm -f "${snapshots[$i]}" "${snapshots[$i]}.sha256"
+            local old_file="${snapshots[$i]}"
+            log_info "  删除: $(basename "$old_file")"
+            rm -f "$old_file" "${old_file}.sha256"
+            ((removed++))
         done
-        log_success "本地清理完成"
+        log_success "清理完成: 删除 $removed 个旧快照"
+    else
+        log_info "快照数量未超限 ($total/$keep)"
     fi
 }
 
@@ -293,16 +499,24 @@ clean_remote_snapshots() {
     ssh -i "$ssh_key" -p "$REMOTE_PORT" $ssh_opts "${REMOTE_USER}@${REMOTE_HOST}" \
         "find '${REMOTE_PATH}/system_snapshots' -name '*.tar*' -mtime +${REMOTE_KEEP_DAYS:-30} -delete" \
         2>/dev/null || true
+    
+    log_info "远程清理完成 (保留${REMOTE_KEEP_DAYS:-30}天)"
 }
 
 # ===== 主程序 =====
 main() {
     log_info "========================================"
     log_info "SnapSync v3.0 备份开始"
+    log_info "主机: ${HOSTNAME:-$(hostname)}"
     log_info "========================================"
     
     acquire_lock
     load_config
+    
+    # 测试Telegram（仅在启用时）
+    if [[ "${TELEGRAM_ENABLED}" =~ ^[Yy]|true$ ]]; then
+        test_telegram || log_error "Telegram测试失败，但继续备份"
+    fi
     
     local snapshot_file
     if snapshot_file=$(create_snapshot); then
@@ -318,6 +532,8 @@ main() {
     if [[ "${REMOTE_ENABLED}" =~ ^[Yy]|true$ ]]; then
         if [[ "${UPLOAD_REMOTE:-Y}" =~ ^[Yy]$ ]]; then
             upload_to_remote "$snapshot_file" || log_error "上传失败"
+        else
+            log_info "跳过远程上传（用户选择）"
         fi
     fi
     
