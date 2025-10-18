@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 无损恢复模块（已修复）
-# 修复: 移除readonly冲突 + 修复恢复选择逻辑
+# SnapSync v3.0 - 无损恢复模块（修复版）
+# 修复：快照列表显示问题 + 改进用户交互
 
 set -euo pipefail
 
-# ===== 路径定义（不使用readonly）=====
+# ===== 路径定义 =====
 CONFIG_FILE="/etc/snapsync/config.conf"
 LOG_FILE="/var/log/snapsync/restore.log"
 
@@ -41,9 +41,14 @@ send_telegram() {
     [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]] && return 0
     [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
     
+    local hostname="${HOSTNAME:-$(hostname)}"
+    local message="🖥️ <b>${hostname}</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+$1"
+    
     curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=$1" \
+        --data-urlencode "text=${message}" \
         -d "parse_mode=HTML" &>/dev/null || true
 }
 
@@ -55,8 +60,10 @@ format_bytes() {
         echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1073741824}")GB"
     elif (( bytes >= 1048576 )); then
         echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1048576}")MB"
-    else
+    elif (( bytes >= 1024 )); then
         echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1024}")KB"
+    else
+        echo "${bytes}B"
     fi
 }
 
@@ -65,52 +72,132 @@ load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
         BACKUP_DIR="${BACKUP_DIR:-/backups}"
+        log_info "配置已加载: 备份目录 = $BACKUP_DIR"
     else
         BACKUP_DIR="/backups"
-        TELEGRAM_ENABLED="false"
+        log_warning "配置文件不存在，使用默认: $BACKUP_DIR"
     fi
 }
 
-# ===== 列出本地快照 =====
+# ===== 列出本地快照（修复版）=====
 list_local_snapshots() {
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    log_info "扫描快照目录: $snapshot_dir"
+    
+    # 检查目录
     if [[ ! -d "$snapshot_dir" ]]; then
         log_error "快照目录不存在: $snapshot_dir"
+        echo ""
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${RED}错误: 快照目录不存在${NC}"
+        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "目录路径: $snapshot_dir"
+        echo ""
+        echo "可能的原因："
+        echo "  1. 还没有创建过快照"
+        echo "  2. 备份目录配置错误"
+        echo ""
+        echo "解决方法："
+        echo "  • 创建快照: ${CYAN}sudo snapsync-backup${NC}"
+        echo "  • 检查配置: ${CYAN}sudo cat $CONFIG_FILE | grep BACKUP_DIR${NC}"
+        echo ""
         return 1
     fi
     
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    # 查找快照（使用正确的find语法）
+    local snapshots=()
+    while IFS= read -r -d '' file; do
+        snapshots+=("$file")
+    done < <(find "$snapshot_dir" -maxdepth 1 -name "system_snapshot_*.tar*" -type f -print0 2>/dev/null | sort -zr)
     
+    # 检查结果
     if [[ ${#snapshots[@]} -eq 0 ]]; then
-        log_error "未找到快照"
+        log_error "未找到快照文件"
+        echo ""
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}警告: 未找到快照文件${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "快照目录: $snapshot_dir"
+        echo ""
+        echo "目录内容："
+        if ls -lh "$snapshot_dir" 2>/dev/null | grep -q '^-'; then
+            ls -lh "$snapshot_dir"
+        else
+            echo "  (目录为空或只有子目录)"
+        fi
+        echo ""
+        echo "提示："
+        echo "  • 创建第一个快照: ${CYAN}sudo snapsync-backup${NC}"
+        echo "  • 查看备份日志: ${CYAN}sudo tail -50 /var/log/snapsync/backup.log${NC}"
+        echo ""
         return 1
     fi
     
+    log_info "找到 ${#snapshots[@]} 个快照"
+    
+    # 显示列表
     echo ""
-    log_info "${CYAN}可用本地快照:${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}可用快照列表 (共 ${#snapshots[@]} 个)${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
     
     for i in "${!snapshots[@]}"; do
         local file="${snapshots[$i]}"
         local name=$(basename "$file")
-        local size=$(format_bytes "$(stat -c%s "$file" 2>/dev/null || echo 0)")
-        local date=$(date -r "$file" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "未知")
+        local size_bytes=$(stat -c%s "$file" 2>/dev/null || echo 0)
+        local size=$(format_bytes "$size_bytes")
+        local date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
         
-        echo -e "  $((i+1))) ${GREEN}$name${NC}"
-        echo -e "      大小: $size | 时间: $date"
+        # 校验状态
+        local checksum_status=""
+        if [[ -f "${file}.sha256" ]]; then
+            checksum_status="${GREEN}✓ 已校验${NC}"
+        else
+            checksum_status="${YELLOW}⚠ 无校验${NC}"
+        fi
+        
+        echo -e "  ${GREEN}$((i+1)))${NC} ${CYAN}${name}${NC}"
+        echo -e "      📦 大小: ${size}"
+        echo -e "      📅 时间: ${date}"
+        echo -e "      🔒 ${checksum_status}"
+        echo ""
     done
     
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     
-    read -p "选择快照 [1-${#snapshots[@]}] 或 0 取消: " choice
+    # 选择快照
+    local choice
+    while true; do
+        read -p "选择快照 [1-${#snapshots[@]}] 或 0 取消: " choice
+        
+        if [[ "$choice" == "0" ]]; then
+            log_info "用户取消"
+            return 1
+        fi
+        
+        if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}请输入有效数字！${NC}"
+            continue
+        fi
+        
+        if (( choice < 1 || choice > ${#snapshots[@]} )); then
+            echo -e "${RED}选择超出范围 (1-${#snapshots[@]})${NC}"
+            continue
+        fi
+        
+        break
+    done
     
-    [[ "$choice" == "0" ]] && return 1
-    [[ ! "$choice" =~ ^[0-9]+$ ]] && log_error "无效选择" && return 1
-    (( choice < 1 || choice > ${#snapshots[@]} )) && log_error "无效选择" && return 1
+    local selected="${snapshots[$((choice-1))]}"
+    log_info "选择: $(basename "$selected")"
     
-    echo "${snapshots[$((choice-1))]}"
+    echo "$selected"
+    return 0
 }
 
 # ===== 验证快照 =====
@@ -122,17 +209,31 @@ verify_snapshot() {
     local checksum_file="${snapshot_file}.sha256"
     
     if [[ ! -f "$checksum_file" ]]; then
-        log_warning "未找到校验和文件"
+        log_warning "未找到校验文件"
+        echo ""
+        echo -e "${YELLOW}⚠ 警告: 未找到校验和文件${NC}"
+        echo "无法验证快照完整性"
+        echo ""
         return 0
     fi
     
-    log_info "验证完整性..."
+    log_info "验证快照完整性..."
+    echo -e "${CYAN}正在验证...${NC}"
     
-    if (cd "$(dirname "$snapshot_file")" && sha256sum -c "$(basename "$checksum_file")" &>/dev/null); then
+    local snapshot_dir=$(dirname "$snapshot_file")
+    local snapshot_name=$(basename "$snapshot_file")
+    local checksum_name=$(basename "$checksum_file")
+    
+    if (cd "$snapshot_dir" && sha256sum -c "$checksum_name" &>/dev/null); then
         log_success "验证通过"
+        echo -e "${GREEN}✓ 快照完整性验证通过${NC}"
+        echo ""
         return 0
     else
         log_error "验证失败"
+        echo -e "${RED}✗ 快照完整性验证失败${NC}"
+        echo "快照文件可能已损坏"
+        echo ""
         return 1
     fi
 }
@@ -142,21 +243,16 @@ backup_critical_configs() {
     local backup_dir="/tmp/snapsync_config_$$"
     mkdir -p "$backup_dir"
     
-    log_info "备份关键配置..."
+    log_info "备份关键配置到: $backup_dir"
     
-    # 网络
-    cp -r /etc/network "$backup_dir/" 2>/dev/null || true
-    cp -r /etc/netplan "$backup_dir/" 2>/dev/null || true
-    cp /etc/resolv.conf "$backup_dir/" 2>/dev/null || true
-    
-    # SSH
-    cp -r /etc/ssh "$backup_dir/" 2>/dev/null || true
-    cp -r /root/.ssh "$backup_dir/root_ssh" 2>/dev/null || true
-    
-    # 主机
-    cp /etc/hostname "$backup_dir/" 2>/dev/null || true
-    cp /etc/hosts "$backup_dir/" 2>/dev/null || true
-    cp /etc/fstab "$backup_dir/" 2>/dev/null || true
+    [[ -d /etc/network ]] && cp -r /etc/network "$backup_dir/" 2>/dev/null || true
+    [[ -d /etc/netplan ]] && cp -r /etc/netplan "$backup_dir/" 2>/dev/null || true
+    [[ -f /etc/resolv.conf ]] && cp /etc/resolv.conf "$backup_dir/" 2>/dev/null || true
+    [[ -d /etc/ssh ]] && cp -r /etc/ssh "$backup_dir/" 2>/dev/null || true
+    [[ -d /root/.ssh ]] && cp -r /root/.ssh "$backup_dir/root_ssh" 2>/dev/null || true
+    [[ -f /etc/hostname ]] && cp /etc/hostname "$backup_dir/" 2>/dev/null || true
+    [[ -f /etc/hosts ]] && cp /etc/hosts "$backup_dir/" 2>/dev/null || true
+    [[ -f /etc/fstab ]] && cp /etc/fstab "$backup_dir/" 2>/dev/null || true
     
     log_success "配置已备份"
     echo "$backup_dir"
@@ -170,16 +266,11 @@ restore_critical_configs() {
     
     log_info "恢复关键配置..."
     
-    # 网络
     [[ -d "$backup_dir/network" ]] && cp -r "$backup_dir/network" /etc/ 2>/dev/null || true
     [[ -d "$backup_dir/netplan" ]] && cp -r "$backup_dir/netplan" /etc/ 2>/dev/null || true
     [[ -f "$backup_dir/resolv.conf" ]] && cp "$backup_dir/resolv.conf" /etc/ 2>/dev/null || true
-    
-    # SSH
     [[ -d "$backup_dir/ssh" ]] && cp -r "$backup_dir/ssh" /etc/ 2>/dev/null || true
     [[ -d "$backup_dir/root_ssh" ]] && cp -r "$backup_dir/root_ssh" /root/.ssh 2>/dev/null || true
-    
-    # 主机
     [[ -f "$backup_dir/hostname" ]] && cp "$backup_dir/hostname" /etc/ 2>/dev/null || true
     [[ -f "$backup_dir/hosts" ]] && cp "$backup_dir/hosts" /etc/ 2>/dev/null || true
     [[ -f "$backup_dir/fstab" ]] && cp "$backup_dir/fstab" /etc/ 2>/dev/null || true
@@ -200,11 +291,15 @@ perform_restore() {
     local snapshot_name=$(basename "$snapshot_file")
     local size=$(format_bytes "$(stat -c%s "$snapshot_file" 2>/dev/null || echo 0)")
     
+    echo ""
     log_info "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     log_info "${CYAN}开始系统恢复${NC}"
     log_info "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
     log_info "快照: $snapshot_name"
+    log_info "大小: $size"
     log_info "模式: $restore_mode"
+    echo ""
     
     send_telegram "🔄 <b>开始恢复</b>
 
@@ -213,15 +308,20 @@ perform_restore() {
     
     # 验证
     if ! verify_snapshot "$snapshot_file"; then
+        echo ""
         read -p "验证失败，是否继续? [y/N]: " continue_restore
-        [[ ! "$continue_restore" =~ ^[Yy]$ ]] && log_error "已取消" && return 1
+        [[ ! "$continue_restore" =~ ^[Yy]$ ]] && log_info "已取消" && return 1
     fi
     
-    # 备份配置（智能模式）
+    # 备份配置
     local config_backup_dir=""
-    [[ "$restore_mode" == "智能恢复" ]] && config_backup_dir=$(backup_critical_configs)
+    if [[ "$restore_mode" == "智能恢复" ]]; then
+        echo ""
+        log_info "正在备份关键配置..."
+        config_backup_dir=$(backup_critical_configs)
+    fi
     
-    # 检测压缩
+    # 解压工具
     local decompress_cmd="cat"
     if [[ "$snapshot_file" =~ \.gz$ ]]; then
         decompress_cmd=$(command -v pigz &>/dev/null && echo "pigz -dc" || echo "gunzip -c")
@@ -230,6 +330,8 @@ perform_restore() {
     elif [[ "$snapshot_file" =~ \.xz$ ]]; then
         decompress_cmd="xz -dc"
     fi
+    
+    log_info "解压: $decompress_cmd"
     
     # tar参数
     local tar_opts=(
@@ -251,15 +353,19 @@ perform_restore() {
         "--exclude=tmp/*"
     )
     
-    log_info "开始解压..."
+    echo ""
+    log_info "开始解压恢复..."
+    echo -e "${YELLOW}这可能需要几分钟...${NC}"
+    echo ""
     
     local start_time=$(date +%s)
     
-    # 执行恢复
+    # 执行
     cd / && {
-        if $decompress_cmd "$snapshot_file" | tar "${tar_opts[@]}" 2>/tmp/restore_err.log; then
+        if $decompress_cmd "$snapshot_file" 2>/tmp/restore_err.log | tar "${tar_opts[@]}" 2>&1 | tee -a "$LOG_FILE"; then
             local duration=$(($(date +%s) - start_time))
             
+            echo ""
             log_success "恢复完成"
             log_info "耗时: ${duration}秒"
             
@@ -270,13 +376,20 @@ perform_restore() {
             send_telegram "✅ <b>恢复完成</b>
 
 ⏱️ 耗时: ${duration}秒
-⚠️ 建议重启"
+⚠️ 建议重启系统"
             
             return 0
         else
-            log_error "恢复失败: $(cat /tmp/restore_err.log 2>/dev/null)"
+            log_error "恢复失败"
+            cat /tmp/restore_err.log 2>/dev/null | tail -10
+            
             [[ -n "$config_backup_dir" ]] && restore_critical_configs "$config_backup_dir"
             [[ -n "$config_backup_dir" ]] && rm -rf "$config_backup_dir"
+            
+            send_telegram "❌ <b>恢复失败</b>
+
+请查看日志: $LOG_FILE"
+            
             return 1
         fi
     }
@@ -284,27 +397,38 @@ perform_restore() {
 
 # ===== 主程序 =====
 main() {
+    clear
+    echo ""
     log_info "========================================"
     log_info "SnapSync v3.0 系统恢复"
+    log_info "主机: $(hostname)"
     log_info "========================================"
+    echo ""
     
     load_config
     
-    # 直接列出并选择快照
+    # 选择快照
     local snapshot_file
-    snapshot_file=$(list_local_snapshots)
+    snapshot_file=$(list_local_snapshots) || {
+        echo ""
+        log_error "未选择快照"
+        exit 1
+    }
     
-    if [[ -z "$snapshot_file" || ! -f "$snapshot_file" ]]; then
-        log_error "未选择有效快照"
-        return 1
-    fi
+    [[ -z "$snapshot_file" || ! -f "$snapshot_file" ]] && log_error "无效快照" && exit 1
     
     # 选择模式
     echo ""
-    log_info "${CYAN}选择恢复模式${NC}"
+    echo -e "${CYAN}选择恢复模式${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}1)${NC} 🛡️ 智能恢复（推荐）- 保留网络和SSH配置"
-    echo -e "  ${GREEN}2)${NC} 🔧 完全恢复 - 恢复所有内容"
+    echo -e "  ${GREEN}1)${NC} 🛡️  智能恢复（推荐）"
+    echo -e "      • 恢复系统文件"
+    echo -e "      • 保留网络/SSH配置"
+    echo -e "      • 防止断网"
+    echo ""
+    echo -e "  ${GREEN}2)${NC} 🔧 完全恢复"
+    echo -e "      • 恢复所有内容"
+    echo -e "      • ${RED}可能导致断网${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     
@@ -315,31 +439,42 @@ main() {
     
     # 确认
     echo ""
-    log_warning "${RED}警告: 恢复不可撤销！${NC}"
+    log_warning "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log_warning "${RED}警告: 系统恢复不可撤销！${NC}"
+    log_warning "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo "即将恢复快照: $(basename "$snapshot_file")"
-    echo "恢复模式: $restore_mode"
+    echo "即将恢复:"
+    echo "  快照: $(basename "$snapshot_file")"
+    echo "  模式: $restore_mode"
     echo ""
     
     read -p "确认恢复? 输入 'YES': " final_confirm
     
-    [[ "$final_confirm" != "YES" ]] && log_info "已取消" && return 0
+    [[ "$final_confirm" != "YES" ]] && log_info "已取消" && exit 0
     
     # 执行
     if perform_restore "$snapshot_file" "$restore_mode"; then
+        echo ""
         log_success "========================================"
         log_success "系统恢复完成！"
         log_success "========================================"
-        
         echo ""
-        log_warning "${YELLOW}建议重启系统${NC}"
+        log_warning "${YELLOW}建议立即重启系统${NC}"
         echo ""
         
         read -p "是否重启? [y/N]: " do_reboot
         [[ "$do_reboot" =~ ^[Yy]$ ]] && { log_info "重启中..."; sleep 3; reboot; }
     else
         log_error "恢复失败"
+        exit 1
     fi
 }
+
+# 权限检查
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}错误: 需要 root 权限${NC}"
+    echo -e "${YELLOW}使用: sudo $0${NC}"
+    exit 1
+fi
 
 main "$@"
