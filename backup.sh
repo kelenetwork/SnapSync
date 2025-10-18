@@ -38,8 +38,9 @@ log_success() {
 send_telegram() {
     local message="$1"
     
-    # 详细检查Telegram配置
-    if [[ "${TELEGRAM_ENABLED:-false}" != "Y" && "${TELEGRAM_ENABLED:-false}" != "true" ]]; then
+    # 详细检查Telegram配置（大小写不敏感）
+    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
         log_info "[TG] Telegram未启用 (TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-未设置})"
         return 0
     fi
@@ -53,6 +54,9 @@ send_telegram() {
         log_error "[TG] CHAT_ID未设置"
         return 1
     fi
+    
+    # ... 其余代码保持不变
+}
     
     # 添加VPS标识（支持多VPS管理）
     local hostname="${HOSTNAME:-$(hostname)}"
