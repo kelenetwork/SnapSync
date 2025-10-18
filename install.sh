@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# SnapSync v3.0 安装脚本 - 已修复所有已知bug
-# 直接运行此脚本即可完成安装
+# SnapSync v3.0 安装脚本 - 修复版
+# 新增：记录安装源路径，方便卸载时清理
 
 set -euo pipefail
 
@@ -13,11 +13,14 @@ readonly BLUE='\033[0;34m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-# ===== 路径定义 (不使用readonly避免冲突) =====
+# ===== 路径定义 =====
 INSTALL_DIR="/opt/snapsync"
 CONFIG_DIR="/etc/snapsync"
 LOG_DIR="/var/log/snapsync"
 DEFAULT_BACKUP_DIR="/backups"
+
+# 记录安装源路径（用于卸载）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ===== 权限检查 =====
 if [[ $EUID -ne 0 ]]; then
@@ -153,42 +156,40 @@ create_directories() {
 copy_program_files() {
     log "${CYAN}复制程序文件...${NC}"
     
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    
     # 复制主脚本
-    if [[ -f "$script_dir/snapsync.sh" ]]; then
-        cp "$script_dir/snapsync.sh" "$INSTALL_DIR/snapsync.sh"
+    if [[ -f "$SCRIPT_DIR/snapsync.sh" ]]; then
+        cp "$SCRIPT_DIR/snapsync.sh" "$INSTALL_DIR/snapsync.sh"
         chmod +x "$INSTALL_DIR/snapsync.sh"
         log "${GREEN}  ✓ snapsync.sh${NC}"
     fi
     
     # 复制模块
     for module in backup.sh restore.sh config.sh utils.sh; do
-        if [[ -f "$script_dir/modules/$module" ]]; then
-            cp "$script_dir/modules/$module" "$INSTALL_DIR/modules/"
+        if [[ -f "$SCRIPT_DIR/modules/$module" ]]; then
+            cp "$SCRIPT_DIR/modules/$module" "$INSTALL_DIR/modules/"
             chmod +x "$INSTALL_DIR/modules/$module"
             log "${GREEN}  ✓ modules/$module${NC}"
-        elif [[ -f "$script_dir/$module" ]]; then
-            cp "$script_dir/$module" "$INSTALL_DIR/modules/"
+        elif [[ -f "$SCRIPT_DIR/$module" ]]; then
+            cp "$SCRIPT_DIR/$module" "$INSTALL_DIR/modules/"
             chmod +x "$INSTALL_DIR/modules/$module"
             log "${GREEN}  ✓ $module${NC}"
         fi
     done
     
     # 复制Bot
-    if [[ -f "$script_dir/bot/telegram_bot.sh" ]]; then
-        cp "$script_dir/bot/telegram_bot.sh" "$INSTALL_DIR/bot/"
+    if [[ -f "$SCRIPT_DIR/bot/telegram_bot.sh" ]]; then
+        cp "$SCRIPT_DIR/bot/telegram_bot.sh" "$INSTALL_DIR/bot/"
         chmod +x "$INSTALL_DIR/bot/telegram_bot.sh"
         log "${GREEN}  ✓ bot/telegram_bot.sh${NC}"
-    elif [[ -f "$script_dir/telegram_bot.sh" ]]; then
-        cp "$script_dir/telegram_bot.sh" "$INSTALL_DIR/bot/"
+    elif [[ -f "$SCRIPT_DIR/telegram_bot.sh" ]]; then
+        cp "$SCRIPT_DIR/telegram_bot.sh" "$INSTALL_DIR/bot/"
         chmod +x "$INSTALL_DIR/bot/telegram_bot.sh"
         log "${GREEN}  ✓ telegram_bot.sh${NC}"
     fi
     
     # 复制诊断工具
-    if [[ -f "$script_dir/telegram-test.sh" ]]; then
-        cp "$script_dir/telegram-test.sh" "$INSTALL_DIR/scripts/"
+    if [[ -f "$SCRIPT_DIR/telegram-test.sh" ]]; then
+        cp "$SCRIPT_DIR/telegram-test.sh" "$INSTALL_DIR/scripts/"
         chmod +x "$INSTALL_DIR/scripts/telegram-test.sh"
         ln -sf "$INSTALL_DIR/scripts/telegram-test.sh" /usr/local/bin/telegram-test
         log "${GREEN}  ✓ telegram-test.sh${NC}"
@@ -301,18 +302,23 @@ run_config_wizard() {
         backup_time=${backup_time:-03:00}
     fi
     
-    # 生成配置文件
+    # 生成配置文件（新增 INSTALL_SOURCE_PATH）
     cat > "$CONFIG_DIR/config.conf" << EOF
 #!/bin/bash
 # SnapSync v3.0 配置文件
 # 生成时间: $(date '+%F %T')
 
-# Telegram配置
+# ===== 安装信息 =====
+INSTALL_SOURCE_PATH="${SCRIPT_DIR}"
+INSTALL_DATE="$(date '+%F %T')"
+HOSTNAME="$(hostname)"
+
+# ===== Telegram配置 =====
 TELEGRAM_ENABLED="${enable_tg}"
 TELEGRAM_BOT_TOKEN="${bot_token}"
 TELEGRAM_CHAT_ID="${chat_id}"
 
-# 远程备份
+# ===== 远程备份 =====
 REMOTE_ENABLED="${enable_remote}"
 REMOTE_HOST="${remote_host}"
 REMOTE_USER="${remote_user}"
@@ -320,31 +326,28 @@ REMOTE_PORT="${remote_port}"
 REMOTE_PATH="${remote_path}"
 REMOTE_KEEP_DAYS="30"
 
-# 本地备份
+# ===== 本地备份 =====
 BACKUP_DIR="${backup_dir}"
 COMPRESSION_LEVEL="${compression}"
 PARALLEL_THREADS="auto"
 LOCAL_KEEP_COUNT="${keep_count}"
 
-# 定时任务
+# ===== 定时任务 =====
 AUTO_BACKUP_ENABLED="${enable_auto}"
 BACKUP_INTERVAL_DAYS="${interval}"
 BACKUP_TIME="${backup_time}"
 
-# 高级配置
+# ===== 高级配置 =====
 ENABLE_ACL="true"
 ENABLE_XATTR="true"
 ENABLE_VERIFICATION="true"
 DISK_THRESHOLD="90"
 MEMORY_THRESHOLD="85"
-
-# 系统信息
-HOSTNAME="$(hostname)"
-INSTALL_DATE="$(date '+%F %T')"
 EOF
 
     chmod 600 "$CONFIG_DIR/config.conf"
-    log "${GREEN}✓ 配置文件已生成${NC}\n"
+    log "${GREEN}✓ 配置文件已生成${NC}"
+    log "${CYAN}  安装源路径已记录: ${SCRIPT_DIR}${NC}\n"
 }
 
 # ===== 设置系统服务 =====
@@ -396,6 +399,8 @@ ExecStart=/opt/snapsync/bot/telegram_bot.sh
 Restart=always
 RestartSec=10
 User=root
+StandardOutput=append:/var/log/snapsync/bot.log
+StandardError=append:/var/log/snapsync/bot.log
 
 [Install]
 WantedBy=multi-user.target
@@ -459,6 +464,7 @@ finish_installation() {
     echo -e "  程序目录: $INSTALL_DIR"
     echo -e "  配置文件: $CONFIG_DIR/config.conf"
     echo -e "  日志目录: $LOG_DIR"
+    echo -e "  安装源: ${SCRIPT_DIR}"
     [[ -f "$CONFIG_DIR/config.conf" ]] && source "$CONFIG_DIR/config.conf" && echo -e "  备份目录: ${BACKUP_DIR}"
     echo ""
     
@@ -480,8 +486,8 @@ main() {
     show_banner
     detect_system
     install_dependencies
-    create_directories     # ← 先创建目录
-    run_config_wizard      # ← 再运行配置向导
+    create_directories
+    run_config_wizard
     copy_program_files
     setup_systemd_services
     create_shortcuts
