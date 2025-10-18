@@ -442,7 +442,7 @@ test_telegram_connection() {
     pause
 }
 
-# ===== 4. 查看快照列表 =====
+# ===== 4. 查看快照列表（修复版 - 排除 SHA256）=====
 list_snapshots() {
     show_header
     log "${CYAN}📊 快照列表${NC}"
@@ -463,7 +463,18 @@ list_snapshots() {
         return
     fi
     
-    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    # 使用 ls + grep 排除 .sha256 文件
+    local snapshots=()
+    
+    if cd "$snapshot_dir" 2>/dev/null; then
+        while IFS= read -r file; do
+            # 确保是文件且不是 .sha256
+            if [[ -f "$file" && "$file" != *.sha256 ]]; then
+                snapshots+=("$snapshot_dir/$file")
+            fi
+        done < <(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$')
+        cd - >/dev/null
+    fi
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
         log "${YELLOW}未找到快照${NC}"
@@ -473,16 +484,20 @@ list_snapshots() {
         for i in "${!snapshots[@]}"; do
             local file="${snapshots[$i]}"
             local name=$(basename "$file")
-            local size=$(du -h "$file" | cut -f1)
+            local size=$(du -h "$file" 2>/dev/null | cut -f1 || echo "N/A")
             local date=$(date -r "$file" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "未知")
             
             echo -e "  $((i+1)). ${GREEN}$name${NC}"
             echo -e "     大小: $size | 时间: $date"
-            [[ -f "${file}.sha256" ]] && echo -e "     状态: ${GREEN}✓ 已验证${NC}"
+            
+            # 检查是否有校验文件（但不显示 .sha256 文件本身）
+            if [[ -f "${file}.sha256" ]]; then
+                echo -e "     状态: ${GREEN}✓ 已验证${NC}"
+            fi
             echo ""
         done
         
-        local total_size=$(du -sh "$snapshot_dir" 2>/dev/null | cut -f1)
+        local total_size=$(du -sh "$snapshot_dir" 2>/dev/null | cut -f1 || echo "N/A")
         echo -e "${CYAN}总大小: $total_size${NC}"
     fi
     
