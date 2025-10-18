@@ -86,126 +86,85 @@ load_config() {
 list_local_snapshots() {
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
-    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info "扫描快照目录: $snapshot_dir"
-    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "扫描快照目录: $snapshot_dir" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
     
-    # 检查目录
     if [[ ! -d "$snapshot_dir" ]]; then
-        log_error "快照目录不存在: $snapshot_dir"
-        echo ""
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${RED}错误: 快照目录不存在${NC}"
-        echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        echo "目录路径: $snapshot_dir"
-        echo "配置的备份目录: $BACKUP_DIR"
-        echo ""
-        echo "调试信息："
-        echo "  检查父目录："
-        ls -la "$BACKUP_DIR" 2>/dev/null | head -10 || echo "  父目录不存在"
-        echo ""
+        echo "错误: 目录不存在" >&2
+        ls -la "$BACKUP_DIR" 2>/dev/null >&2
         return 1
     fi
     
-    log_info "目录存在，正在查找快照文件（排除 .sha256）..."
+    echo "正在读取快照文件..." >&2
+    echo "" >&2
     
-    # ===== 使用最简单的方法：直接在目标目录里用 ls =====
     local snapshots=()
-    local current_dir=$(pwd)
-    
-    # 进入快照目录并获取文件列表
-    cd "$snapshot_dir" || {
-        log_error "无法进入目录: $snapshot_dir"
-        return 1
-    }
-    
-    # 获取所有 .tar* 文件，排除 .sha256，按时间倒序
-    log_info "执行: ls -t system_snapshot_*.tar* | grep -v '.sha256\$'"
-    for file in $(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$'); do
-        # 使用绝对路径
-        if [[ -f "$file" ]]; then
-            snapshots+=("${snapshot_dir}/${file}")
-            log_info "找到快照: ${file}"
+    while IFS= read -r -d '' file; do
+        if [[ "$file" != *.sha256 ]]; then
+            snapshots+=("$file")
+            echo "[DEBUG] 找到: $(basename "$file")" >&2
         fi
-    done
+    done < <(find "$snapshot_dir" -maxdepth 1 -name "system_snapshot_*.tar*" -type f -print0 2>/dev/null | sort -zr)
     
-    # 返回原目录
-    cd "$current_dir"
+    echo "" >&2
+    echo "[DEBUG] 数组长度: ${#snapshots[@]}" >&2
+    echo "" >&2
     
-    log_info "总共找到 ${#snapshots[@]} 个快照文件"
-    
-    # 检查结果
     if [[ ${#snapshots[@]} -eq 0 ]]; then
-        log_error "未找到快照文件"
-        echo ""
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}警告: 未找到快照文件${NC}"
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        echo "快照目录: $snapshot_dir"
-        echo "配置的备份目录: $BACKUP_DIR"
-        echo ""
-        echo "调试信息："
-        echo "  目录内容（包含.sha256）："
-        ls -lh "$snapshot_dir" 2>/dev/null | head -15 || echo "  无法读取"
-        echo ""
-        echo "  统计："
-        echo "    .tar.gz 文件: $(find "$snapshot_dir" -name "*.tar.gz" 2>/dev/null | wc -l)"
-        echo "    .sha256 文件: $(find "$snapshot_dir" -name "*.sha256" 2>/dev/null | wc -l)"
-        echo ""
+        echo "未找到快照文件" >&2
+        ls -lh "$snapshot_dir" 2>/dev/null | head -10 >&2
         return 1
     fi
     
     # 显示列表
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}可用快照列表 (共 ${#snapshots[@]} 个)${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "找到 ${#snapshots[@]} 个快照" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "" >&2
     
-    for i in "${!snapshots[@]}"; do
-        local file="${snapshots[$i]}"
+    local idx=1
+    for file in "${snapshots[@]}"; do
         local name=$(basename "$file")
         local size_bytes=$(stat -c%s "$file" 2>/dev/null || echo 0)
         local size=$(format_bytes "$size_bytes")
-        local date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
+        local date=$(date -r "$file" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "未知")
         
-        # 校验状态
-        local checksum_status=""
+        echo "${idx}) ${name}" >&2
+        echo "   大小: ${size}" >&2
+        echo "   时间: ${date}" >&2
+        
         if [[ -f "${file}.sha256" ]]; then
-            checksum_status="${GREEN}✓ 已校验${NC}"
+            echo "   状态: ✓ 已校验" >&2
         else
-            checksum_status="${YELLOW}⚠ 无校验${NC}"
+            echo "   状态: ⚠ 无校验" >&2
         fi
+        echo "" >&2
         
-        echo -e "  ${GREEN}$((i+1)))${NC} ${CYAN}${name}${NC}"
-        echo -e "      📦 大小: ${size}"
-        echo -e "      📅 时间: ${date}"
-        echo -e "      🔒 ${checksum_status}"
-        echo ""
+        ((idx++))
     done
     
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "" >&2
     
     # 选择快照
     local choice
     while true; do
-        read -p "选择快照 [1-${#snapshots[@]}] 或 0 取消: " choice
+        read -p "选择快照 [1-${#snapshots[@]}] 或 0 取消: " choice >&2
         
         if [[ "$choice" == "0" ]]; then
-            log_info "用户取消"
+            echo "已取消" >&2
             return 1
         fi
         
         if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
-            echo -e "${RED}请输入有效数字！${NC}"
+            echo "请输入有效数字！" >&2
             continue
         fi
         
         if (( choice < 1 || choice > ${#snapshots[@]} )); then
-            echo -e "${RED}选择超出范围 (1-${#snapshots[@]})${NC}"
+            echo "选择超出范围 (1-${#snapshots[@]})" >&2
             continue
         fi
         
@@ -213,8 +172,10 @@ list_local_snapshots() {
     done
     
     local selected="${snapshots[$((choice-1))]}"
-    log_info "选择: $(basename "$selected")"
+    echo "已选择: $(basename "$selected")" >&2
+    echo "" >&2
     
+    # 只有这一行输出到 stdout（被捕获到变量）
     echo "$selected"
     return 0
 }
