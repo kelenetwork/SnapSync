@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # SnapSync v3.0 - Telegram Bot（完整功能版）
-# 新增：恢复快照时支持选择本地/远程来源
-# 修复：SSH 连接强制使用密钥认证
+# 新增：创建快照、恢复快照、配置编辑
 
 set -u
 
@@ -146,6 +145,7 @@ format_bytes() {
 }
 
 # ===== 按钮构建函数 =====
+
 get_main_menu_keyboard() {
     echo '{
   "inline_keyboard": [
@@ -169,6 +169,7 @@ get_back_button() {
 }
 
 # ===== Bot 命令处理 =====
+
 cmd_start() {
     local chat_id="$1"
     
@@ -181,7 +182,7 @@ cmd_start() {
 • 📊 查看系统状态
 • 📋 浏览快照列表
 • 🔄 创建系统快照
-• ♻️ 恢复系统快照（本地/远程）
+• ♻️ 恢复系统快照
 • ⚙️ 管理配置
 • 🗑️ 删除旧快照
 
@@ -204,6 +205,7 @@ cmd_menu() {
 }
 
 # ===== 按钮回调处理 =====
+
 handle_menu_main() {
     local chat_id="$1"
     local message_id="$2"
@@ -234,10 +236,7 @@ handle_menu_status() {
     local disk_free=$(echo "$disk_info" | awk '{print $4}' || echo "N/A")
     
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
-    local snapshot_count=0
-    if [[ -d "$snapshot_dir" ]]; then
-        snapshot_count=$(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | grep -v '\.sha256$' | wc -l)
-    fi
+    local snapshot_count=$(find "$snapshot_dir" -name "*.tar.gz" -o -name "*.tar.bz2" -o -name "*.tar.xz" 2>/dev/null | wc -l || echo 0)
     
     local latest="无"
     local latest_size="N/A"
@@ -292,6 +291,7 @@ handle_menu_list() {
     
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    # 使用 find 排除 .sha256
     local snapshots=()
     while IFS= read -r -d '' file; do
         if [[ "$file" != *.sha256 ]]; then
@@ -408,7 +408,7 @@ handle_confirm_create() {
     ) &
 }
 
-# ===== 恢复快照（新增：选择来源）=====
+# ===== 恢复快照 =====
 handle_menu_restore() {
     local chat_id="$1"
     local message_id="$2"
@@ -416,49 +416,9 @@ handle_menu_restore() {
     
     answer_callback "$callback_id" "恢复快照"
     
-    # 检查远程备份是否启用
-    local remote_enabled=$(echo "${REMOTE_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
-    
-    local message="♻️ <b>恢复快照</b>
-
-选择快照来源:"
-    
-    local keyboard
-    if [[ "$remote_enabled" == "y" || "$remote_enabled" == "yes" || "$remote_enabled" == "true" ]]; then
-        # 远程备份已启用，显示两个选项
-        keyboard='{
-  "inline_keyboard": [
-    [{"text": "📁 本地快照", "callback_data": "restore_source_local"}],
-    [{"text": "🌐 远程快照", "callback_data": "restore_source_remote"}],
-    [{"text": "🔙 返回", "callback_data": "menu_main"}]
-  ]
-}'
-    else
-        # 远程备份未启用，只有本地选项
-        keyboard='{
-  "inline_keyboard": [
-    [{"text": "📁 本地快照", "callback_data": "restore_source_local"}],
-    [{"text": "🔙 返回", "callback_data": "menu_main"}]
-  ]
-}'
-        message+="
-
-<i>💡 提示: 远程备份未启用</i>"
-    fi
-    
-    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
-}
-
-# ===== 恢复 - 本地快照列表 =====
-handle_restore_source_local() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id" "本地快照"
-    
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    # 获取快照列表（排除 .sha256）
     local snapshots=()
     while IFS= read -r -d '' file; do
         if [[ "$file" != *.sha256 ]]; then
@@ -467,7 +427,7 @@ handle_restore_source_local() {
     done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
-        local message="♻️ <b>本地快照</b>
+        local message="♻️ <b>恢复快照</b>
 
 暂无可恢复的快照
 
@@ -486,17 +446,16 @@ handle_restore_source_local() {
         local name=$(basename "$file")
         local short_name="${name:17:14}"
         
-        buttons+="{\"text\": \"$((i+1)). ${short_name}\", \"callback_data\": \"restore_local_${i}\"},"
+        buttons+="{\"text\": \"$((i+1)). ${short_name}\", \"callback_data\": \"restore_${i}\"},"
         ((count++))
     done
     buttons="${buttons%,}]"
     
-    local keyboard="{\"inline_keyboard\":[$buttons,[{\"text\":\"🔙 返回\",\"callback_data\":\"menu_restore\"}]]}"
+    local keyboard="{\"inline_keyboard\":[$buttons,[{\"text\":\"🔙 返回\",\"callback_data\":\"menu_main\"}]]}"
     
-    local message="♻️ <b>选择本地快照</b>
+    local message="♻️ <b>恢复快照</b>
 
-📁 本地备份目录
-找到 ${#snapshots[@]} 个快照
+选择要恢复的快照:
 
 <b>⚠️ 警告:</b>
 恢复操作不可撤销，请谨慎选择！
@@ -506,127 +465,7 @@ handle_restore_source_local() {
     edit_message "$chat_id" "$message_id" "$message" "$keyboard"
 }
 
-# ===== 恢复 - 远程快照列表 =====
-handle_restore_source_remote() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id" "远程快照"
-    
-    # 显示加载消息
-    local loading_message="♻️ <b>连接远程服务器</b>
-
-🌐 服务器: ${REMOTE_HOST}
-⏳ 正在获取快照列表...
-
-<i>请稍候...</i>"
-    
-    edit_message "$chat_id" "$message_id" "$loading_message" ""
-    
-    # 在后台获取远程快照列表
-    (
-        local ssh_key="/root/.ssh/id_ed25519"
-        
-        local ssh_opts=(
-            "-o" "StrictHostKeyChecking=no"
-            "-o" "UserKnownHostsFile=/dev/null"
-            "-o" "PasswordAuthentication=no"
-            "-o" "PreferredAuthentications=publickey"
-            "-o" "PubkeyAuthentication=yes"
-            "-o" "BatchMode=yes"
-            "-o" "ConnectTimeout=30"
-            "-o" "LogLevel=ERROR"
-        )
-        
-        # 测试连接
-        if ! ssh -i "$ssh_key" -p "$REMOTE_PORT" "${ssh_opts[@]}" \
-                "${REMOTE_USER}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
-            
-            local error_message="❌ <b>连接失败</b>
-
-🌐 服务器: ${REMOTE_HOST}
-⚠️ 无法连接远程服务器
-
-<b>可能的原因:</b>
-• SSH 密钥未配置
-• 远程服务器不可达
-• 防火墙阻止
-
-<i>请使用主控制台配置远程服务器</i>"
-            
-            send_message_with_buttons "$chat_id" "$error_message" "$(get_back_button)"
-            return 1
-        fi
-        
-        # 获取远程快照列表
-        local remote_list=$(ssh -i "$ssh_key" -p "$REMOTE_PORT" "${ssh_opts[@]}" \
-            "${REMOTE_USER}@${REMOTE_HOST}" \
-            "find '${REMOTE_PATH}/system_snapshots' -name 'system_snapshot_*.tar*' -type f 2>/dev/null | grep -v '\.sha256$' | sort -r" 2>/dev/null)
-        
-        if [[ -z "$remote_list" ]]; then
-            local no_snapshot_message="♻️ <b>远程快照</b>
-
-🌐 服务器: ${REMOTE_HOST}
-📁 未找到远程快照
-
-<i>请先创建并上传快照</i>"
-            
-            send_message_with_buttons "$chat_id" "$no_snapshot_message" "$(get_back_button)"
-            return 1
-        fi
-        
-        # 转换为数组
-        local snapshots=()
-        while IFS= read -r file; do
-            [[ -n "$file" ]] && snapshots+=("$file")
-        done <<< "$remote_list"
-        
-        # 构建快照选择按钮（最多5个）
-        local buttons="["
-        local count=0
-        for i in "${!snapshots[@]}"; do
-            (( count >= 5 )) && break
-            
-            local file="${snapshots[$i]}"
-            local name=$(basename "$file")
-            local short_name="${name:17:14}"
-            
-            buttons+="{\"text\": \"$((i+1)). ${short_name}\", \"callback_data\": \"restore_remote_${i}\"},"
-            ((count++))
-        done
-        buttons="${buttons%,}]"
-        
-        local keyboard="{\"inline_keyboard\":[$buttons,[{\"text\":\"🔙 返回\",\"callback_data\":\"menu_restore\"}]]}"
-        
-        local success_message="♻️ <b>选择远程快照</b>
-
-🌐 服务器: ${REMOTE_HOST}
-找到 ${#snapshots[@]} 个快照
-
-<b>⚠️ 注意:</b>
-• 选择后会先下载快照
-• 下载需要一定时间
-• 建议选择最新的快照"
-        
-        # 保存快照列表到临时文件，供后续使用
-        printf "%s\n" "${snapshots[@]}" > "/tmp/remote_snapshots_${chat_id}.txt"
-        
-        # 更新消息
-        curl -sS -m 10 -X POST "${API_URL}/editMessageText" \
-            -d "chat_id=${chat_id}" \
-            -d "message_id=${message_id}" \
-            --data-urlencode "text=🖥️ <b>${HOSTNAME}</b>
-━━━━━━━━━━━━━━━━━━━━━━━
-${success_message}" \
-            -d "parse_mode=HTML" \
-            -d "reply_markup=${keyboard}" &>/dev/null
-        
-    ) &
-}
-
-# ===== 恢复 - 本地快照确认 =====
-handle_restore_local() {
+handle_restore_snapshot() {
     local chat_id="$1"
     local message_id="$2"
     local callback_id="$3"
@@ -636,6 +475,7 @@ handle_restore_local() {
     
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    # 获取快照列表（使用相同的方法）
     local snapshots=()
     while IFS= read -r -d '' file; do
         if [[ "$file" != *.sha256 ]]; then
@@ -654,9 +494,8 @@ handle_restore_local() {
     
     local message="♻️ <b>确认恢复</b>
 
-📁 来源: 本地快照
-📸 快照: <code>${name}</code>
-📊 大小: ${size}
+快照: <code>${name}</code>
+大小: ${size}
 
 <b>⚠️ 最后警告:</b>
 • 此操作不可撤销
@@ -672,160 +511,68 @@ handle_restore_local() {
 
     local keyboard="{
   \"inline_keyboard\": [
-    [{\"text\": \"🛡️ 智能恢复\", \"callback_data\": \"confirm_restore_local_smart_${snapshot_id}\"}],
-    [{\"text\": \"🔧 完全恢复\", \"callback_data\": \"confirm_restore_local_full_${snapshot_id}\"}],
-    [{\"text\": \"❌ 取消\", \"callback_data\": \"restore_source_local\"}]
+    [{\"text\": \"🛡️ 智能恢复\", \"callback_data\": \"confirm_restore_smart_${snapshot_id}\"}],
+    [{\"text\": \"🔧 完全恢复\", \"callback_data\": \"confirm_restore_full_${snapshot_id}\"}],
+    [{\"text\": \"❌ 取消\", \"callback_data\": \"menu_restore\"}]
   ]
 }"
     
     edit_message "$chat_id" "$message_id" "$message" "$keyboard"
 }
 
-# ===== 恢复 - 远程快照确认 =====
-handle_restore_remote() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local snapshot_id="$4"
-    
-    answer_callback "$callback_id" "准备恢复..."
-    
-    # 从临时文件读取快照列表
-    local temp_file="/tmp/remote_snapshots_${chat_id}.txt"
-    
-    if [[ ! -f "$temp_file" ]]; then
-        answer_callback "$callback_id" "会话已过期，请重新选择"
-        handle_restore_source_remote "$chat_id" "$message_id" "$callback_id"
-        return
-    fi
-    
-    local snapshots=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && snapshots+=("$line")
-    done < "$temp_file"
-    
-    if [[ ! "$snapshot_id" =~ ^[0-9]+$ ]] || (( snapshot_id >= ${#snapshots[@]} )); then
-        answer_callback "$callback_id" "无效的快照"
-        return
-    fi
-    
-    local file="${snapshots[$snapshot_id]}"
-    local name=$(basename "$file")
-    
-    local message="♻️ <b>确认恢复</b>
-
-🌐 来源: 远程服务器
-📸 快照: <code>${name}</code>
-🌐 服务器: ${REMOTE_HOST}
-
-<b>⚠️ 注意事项:</b>
-• 需要先下载快照到本地
-• 下载需要几分钟时间
-• 恢复操作不可撤销
-• 建议选择「智能恢复」
-
-<b>恢复模式:</b>
-• 智能恢复: 保留网络/SSH配置
-• 完全恢复: 恢复所有内容（谨慎）
-
-选择恢复模式:"
-
-    # 保存选中的远程文件路径
-    echo "$file" > "/tmp/remote_snapshot_selected_${chat_id}.txt"
-    
-    local keyboard="{
-  \"inline_keyboard\": [
-    [{\"text\": \"🛡️ 智能恢复\", \"callback_data\": \"confirm_restore_remote_smart_${snapshot_id}\"}],
-    [{\"text\": \"🔧 完全恢复\", \"callback_data\": \"confirm_restore_remote_full_${snapshot_id}\"}],
-    [{\"text\": \"❌ 取消\", \"callback_data\": \"restore_source_remote\"}]
-  ]
-}"
-    
-    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
-}
-
-# ===== 确认恢复（本地/远程统一处理）=====
 handle_confirm_restore() {
     local chat_id="$1"
     local message_id="$2"
     local callback_id="$3"
-    local source="$4"      # local 或 remote
-    local restore_mode="$5" # smart 或 full
-    local snapshot_id="$6"
+    local restore_mode="$4"
+    local snapshot_id="$5"
     
-    answer_callback "$callback_id" "准备恢复..."
+    answer_callback "$callback_id" "开始恢复..."
+    
+    # 获取快照文件
+    local snapshot_dir="${BACKUP_DIR}/system_snapshots"
+    local snapshots=()
+    while IFS= read -r -d '' file; do
+        if [[ "$file" != *.sha256 ]]; then
+            snapshots+=("$file")
+        fi
+    done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    
+    local file="${snapshots[$snapshot_id]}"
+    local name=$(basename "$file")
     
     local mode_text="智能恢复"
     [[ "$restore_mode" == "full" ]] && mode_text="完全恢复"
     
-    if [[ "$source" == "local" ]]; then
-        # 本地恢复
-        local snapshot_dir="${BACKUP_DIR}/system_snapshots"
-        local snapshots=()
-        while IFS= read -r -d '' file; do
-            if [[ "$file" != *.sha256 ]]; then
-                snapshots+=("$file")
-            fi
-        done < <(find "$snapshot_dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
-        
-        local file="${snapshots[$snapshot_id]}"
-        local name=$(basename "$file")
-        
-        local message="♻️ <b>恢复准备就绪</b>
+    local message="♻️ <b>恢复进行中...</b>
 
-📁 来源: 本地快照
 📸 快照: ${name}
 🔧 模式: ${mode_text}
 
-<b>⚠️ 重要提示:</b>
-为了安全，恢复操作需在服务器上手动执行
+⏳ 正在恢复系统
+⚠️ 请勿关闭服务器
 
-<b>执行步骤:</b>
-1. SSH 登录服务器
-2. 运行: <code>sudo snapsync</code>
-3. 选择: 2) 恢复系统快照
-4. 选择: 1) 本地恢复
-5. 选择快照: ${name}
-6. 选择模式: ${mode_text}"
-        
-        send_message_with_buttons "$chat_id" "$message" "$(get_back_button)"
-        
-    else
-        # 远程恢复
-        local temp_file="/tmp/remote_snapshot_selected_${chat_id}.txt"
-        
-        if [[ ! -f "$temp_file" ]]; then
-            answer_callback "$callback_id" "会话已过期"
-            return
-        fi
-        
-        local remote_file=$(cat "$temp_file")
-        local name=$(basename "$remote_file")
-        
-        local message="♻️ <b>恢复准备就绪</b>
+<i>完成后会通知，建议重启</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" ""
+    
+    # 记录到文件，用于恢复脚本读取
+    echo "$file" > /tmp/snapsync_restore_target
+    echo "$restore_mode" > /tmp/snapsync_restore_mode
+    
+    # 提示用户手动恢复（因为恢复操作危险，不自动执行）
+    send_message "$chat_id" "⚠️ <b>恢复准备就绪</b>
 
-🌐 来源: 远程服务器
-📸 快照: ${name}
-🔧 模式: ${mode_text}
+为了安全，请手动执行恢复:
 
-<b>⚠️ 重要提示:</b>
-为了安全，恢复操作需在服务器上手动执行
+<code>sudo snapsync</code>
+选择: 2) 恢复系统快照
 
-<b>执行步骤:</b>
-1. SSH 登录服务器
-2. 运行: <code>sudo snapsync</code>
-3. 选择: 2) 恢复系统快照
-4. 选择: 2) 远程恢复
-5. 选择快照: ${name}
-6. 选择模式: ${mode_text}
+或直接运行:
+<code>sudo snapsync-restore</code>
 
-<i>系统会自动下载并恢复快照</i>"
-        
-        send_message_with_buttons "$chat_id" "$message" "$(get_back_button)"
-        
-        # 清理临时文件
-        rm -f "$temp_file" "/tmp/remote_snapshots_${chat_id}.txt"
-    fi
+快照: ${name}
+模式: ${mode_text}"
 }
 
 # ===== 删除快照 =====
@@ -838,6 +585,7 @@ handle_menu_delete() {
     
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    # 获取快照列表（排除 .sha256）
     local snapshots=()
     while IFS= read -r -d '' file; do
         if [[ "$file" != *.sha256 ]]; then
@@ -889,6 +637,7 @@ handle_delete_snapshot() {
     
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    # 获取快照列表（排除 .sha256）
     local snapshots=()
     while IFS= read -r -d '' file; do
         if [[ "$file" != *.sha256 ]]; then
@@ -932,6 +681,7 @@ handle_confirm_delete() {
     
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    # 获取快照列表（排除 .sha256）
     local snapshots=()
     while IFS= read -r -d '' file; do
         if [[ "$file" != *.sha256 ]]; then
@@ -942,6 +692,7 @@ handle_confirm_delete() {
     local file="${snapshots[$snapshot_id]}"
     local name=$(basename "$file")
     
+    # 删除快照及其 .sha256 文件
     if rm -f "$file" "${file}.sha256" 2>/dev/null; then
         log_bot "快照已删除: ${name}"
         
@@ -987,7 +738,525 @@ handle_menu_config() {
     edit_message "$chat_id" "$message_id" "$message" "$keyboard"
 }
 
-# ===== 帮助 =====
+handle_config_view() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "查看配置"
+    
+    source "$CONFIG_FILE"
+    
+    local message="📄 <b>完整配置</b>
+
+<b>🔔 Telegram</b>
+启用: ${TELEGRAM_ENABLED:-false}
+
+<b>🌐 远程备份</b>
+启用: ${REMOTE_ENABLED:-false}
+服务器: ${REMOTE_HOST:-未配置}
+用户: ${REMOTE_USER:-root}
+端口: ${REMOTE_PORT:-22}
+路径: ${REMOTE_PATH:-未配置}
+保留: ${REMOTE_KEEP_DAYS:-30}天
+
+<b>💾 本地备份</b>
+目录: ${BACKUP_DIR:-/backups}
+压缩: 级别${COMPRESSION_LEVEL:-6}
+线程: ${PARALLEL_THREADS:-auto}
+保留: ${LOCAL_KEEP_COUNT:-5}个
+
+<b>⏰ 定时任务</b>
+自动备份: ${AUTO_BACKUP_ENABLED:-false}
+间隔: ${BACKUP_INTERVAL_DAYS:-7}天
+时间: ${BACKUP_TIME:-03:00}
+
+<i>修改配置请使用配置管理按钮</i>"
+
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
+# ===== Telegram 配置 =====
+handle_config_telegram() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "Telegram配置"
+    
+    source "$CONFIG_FILE"
+    
+    local tg_status="🔴 未启用"
+    local tg_action="enable"
+    local tg_action_text="✅ 启用通知"
+    
+    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$tg_enabled" == "y" || "$tg_enabled" == "yes" || "$tg_enabled" == "true" ]]; then
+        tg_status="🟢 已启用"
+        tg_action="disable"
+        tg_action_text="❌ 禁用通知"
+    fi
+    
+    local message="📡 <b>Telegram 配置</b>
+
+<b>当前状态:</b> ${tg_status}
+
+<b>Bot Token:</b>
+<code>${TELEGRAM_BOT_TOKEN:0:20}...</code>
+
+<b>Chat ID:</b>
+<code>${TELEGRAM_CHAT_ID:-未设置}</code>
+
+<b>💡 提示:</b>
+• Token/Chat ID 需在服务器修改
+• 使用主控制台: <code>sudo snapsync</code>
+• 或编辑配置: <code>sudo nano /etc/snapsync/config.conf</code>
+
+<i>Bot重启后生效</i>"
+
+    local keyboard="{
+  \"inline_keyboard\": [
+    [{\"text\": \"${tg_action_text}\", \"callback_data\": \"toggle_telegram_${tg_action}\"}],
+    [{\"text\": \"🔙 返回配置菜单\", \"callback_data\": \"menu_config\"}]
+  ]
+}"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_toggle_telegram() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local action="$4"
+    
+    answer_callback "$callback_id" "切换中..."
+    
+    local new_value="false"
+    [[ "$action" == "enable" ]] && new_value="true"
+    
+    # 更新配置文件
+    sed -i "s/^TELEGRAM_ENABLED=.*/TELEGRAM_ENABLED=\"$new_value\"/" "$CONFIG_FILE"
+    
+    # 重新加载配置
+    source "$CONFIG_FILE"
+    
+    local status_text="🔴 已禁用"
+    [[ "$new_value" == "true" ]] && status_text="🟢 已启用"
+    
+    local message="✅ <b>配置已更新</b>
+
+Telegram 通知: ${status_text}
+
+<i>返回配置菜单查看更新</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
+# ===== 远程备份配置 =====
+handle_config_remote() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "远程备份配置"
+    
+    source "$CONFIG_FILE"
+    
+    local remote_status="🔴 未启用"
+    local remote_action="enable"
+    local remote_action_text="✅ 启用远程备份"
+    
+    local remote_enabled=$(echo "${REMOTE_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$remote_enabled" == "y" || "$remote_enabled" == "yes" || "$remote_enabled" == "true" ]]; then
+        remote_status="🟢 已启用"
+        remote_action="disable"
+        remote_action_text="❌ 禁用远程备份"
+    fi
+    
+    local message="🌐 <b>远程备份配置</b>
+
+<b>当前状态:</b> ${remote_status}
+
+<b>服务器:</b> ${REMOTE_HOST:-未配置}
+<b>用户:</b> ${REMOTE_USER:-root}
+<b>端口:</b> ${REMOTE_PORT:-22}
+<b>路径:</b> ${REMOTE_PATH:-未配置}
+<b>保留:</b> ${REMOTE_KEEP_DAYS:-30}天
+
+<b>💡 提示:</b>
+• 详细配置需在服务器修改
+• 使用主控制台: <code>sudo snapsync</code>
+• 或编辑配置: <code>sudo nano /etc/snapsync/config.conf</code>
+
+<i>需要配置 SSH 密钥</i>"
+
+    local keyboard="{
+  \"inline_keyboard\": [
+    [{\"text\": \"${remote_action_text}\", \"callback_data\": \"toggle_remote_${remote_action}\"}],
+    [{\"text\": \"🔙 返回配置菜单\", \"callback_data\": \"menu_config\"}]
+  ]
+}"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_toggle_remote() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local action="$4"
+    
+    answer_callback "$callback_id" "切换中..."
+    
+    local new_value="false"
+    [[ "$action" == "enable" ]] && new_value="true"
+    
+    sed -i "s/^REMOTE_ENABLED=.*/REMOTE_ENABLED=\"$new_value\"/" "$CONFIG_FILE"
+    source "$CONFIG_FILE"
+    
+    local status_text="🔴 已禁用"
+    [[ "$new_value" == "true" ]] && status_text="🟢 已启用"
+    
+    local message="✅ <b>配置已更新</b>
+
+远程备份: ${status_text}
+
+<i>返回配置菜单查看更新</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
+# ===== 本地备份配置 =====
+handle_config_local() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "本地备份配置"
+    
+    source "$CONFIG_FILE"
+    
+    local message="💾 <b>本地备份配置</b>
+
+<b>备份目录:</b> ${BACKUP_DIR:-/backups}
+<b>压缩级别:</b> ${COMPRESSION_LEVEL:-6} (1-9)
+<b>并行线程:</b> ${PARALLEL_THREADS:-auto}
+<b>保留数量:</b> ${LOCAL_KEEP_COUNT:-5}个
+
+<b>🎛️ 快速调整:</b>
+• 压缩级别: 1=快速 9=高压缩
+• 保留数量: 本地保留的快照数
+
+<b>💡 提示:</b>
+• 详细配置需在服务器修改
+• 使用主控制台: <code>sudo snapsync</code>
+• 或编辑配置: <code>sudo nano /etc/snapsync/config.conf</code>"
+
+    local keyboard="{
+  \"inline_keyboard\": [
+    [{\"text\": \"🗜️ 压缩:快速(3)\", \"callback_data\": \"set_compression_3\"}],
+    [{\"text\": \"🗜️ 压缩:平衡(6)\", \"callback_data\": \"set_compression_6\"}],
+    [{\"text\": \"🗜️ 压缩:高(9)\", \"callback_data\": \"set_compression_9\"}],
+    [{\"text\": \"📦 保留:3个\", \"callback_data\": \"set_keep_3\"}, {\"text\": \"📦 保留:5个\", \"callback_data\": \"set_keep_5\"}, {\"text\": \"📦 保留:10个\", \"callback_data\": \"set_keep_10\"}],
+    [{\"text\": \"🔙 返回配置菜单\", \"callback_data\": \"menu_config\"}]
+  ]
+}"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_set_compression() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local level="$4"
+    
+    answer_callback "$callback_id" "设置压缩级别..."
+    
+    sed -i "s/^COMPRESSION_LEVEL=.*/COMPRESSION_LEVEL=\"$level\"/" "$CONFIG_FILE"
+    
+    local message="✅ <b>配置已更新</b>
+
+压缩级别: $level
+
+<i>下次备份生效</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
+handle_set_keep() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local count="$4"
+    
+    answer_callback "$callback_id" "设置保留数量..."
+    
+    sed -i "s/^LOCAL_KEEP_COUNT=.*/LOCAL_KEEP_COUNT=\"$count\"/" "$CONFIG_FILE"
+    
+    local message="✅ <b>配置已更新</b>
+
+本地保留: $count 个快照
+
+<i>下次清理时生效</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
+# ===== 定时任务配置 =====
+handle_config_schedule() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "定时任务配置"
+    
+    source "$CONFIG_FILE"
+    
+    local auto_status="🔴 未启用"
+    local auto_action="enable"
+    local auto_action_text="✅ 启用自动备份"
+    
+    local auto_enabled=$(echo "${AUTO_BACKUP_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$auto_enabled" == "y" || "$auto_enabled" == "yes" || "$auto_enabled" == "true" ]]; then
+        auto_status="🟢 已启用"
+        auto_action="disable"
+        auto_action_text="❌ 禁用自动备份"
+    fi
+    
+    local next_run="未启用"
+    if [[ "$auto_status" == "🟢 已启用" ]]; then
+        next_run=$(systemctl list-timers snapsync-backup.timer 2>/dev/null | awk 'NR==2 {print $1" "$2}' || echo "N/A")
+    fi
+    
+    local message="⏰ <b>定时任务配置</b>
+
+<b>当前状态:</b> ${auto_status}
+
+<b>📅 备份间隔:</b> ${BACKUP_INTERVAL_DAYS:-7}天
+<b>🕐 备份时间:</b> ${BACKUP_TIME:-03:00}
+
+<b>⏭️ 下次运行:</b> ${next_run}
+
+<b>🎛️ 快速调整:</b>
+使用下方按钮直接修改间隔和时间
+
+<i>修改后会自动重启定时器</i>"
+
+    local keyboard="{
+  \"inline_keyboard\": [
+    [{\"text\": \"${auto_action_text}\", \"callback_data\": \"toggle_auto_${auto_action}\"}],
+    [{\"text\": \"📅 调整间隔\", \"callback_data\": \"adjust_interval\"}],
+    [{\"text\": \"🕐 调整时间\", \"callback_data\": \"adjust_time\"}],
+    [{\"text\": \"🔄 重启定时器\", \"callback_data\": \"restart_timer\"}],
+    [{\"text\": \"🔙 返回配置菜单\", \"callback_data\": \"menu_config\"}]
+  ]
+}"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+# ===== 调整备份间隔 =====
+handle_adjust_interval() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "调整间隔"
+    
+    source "$CONFIG_FILE"
+    
+    local current_interval="${BACKUP_INTERVAL_DAYS:-7}"
+    
+    local message="📅 <b>调整备份间隔</b>
+
+<b>当前设置:</b> ${current_interval}天
+
+选择新的备份间隔:
+
+<b>💡 建议:</b>
+• 重要系统: 1-3天
+• 一般系统: 7天
+• 稳定系统: 14-30天"
+
+    local keyboard='{
+  "inline_keyboard": [
+    [{"text": "1天", "callback_data": "set_interval_1"}, {"text": "3天", "callback_data": "set_interval_3"}, {"text": "7天", "callback_data": "set_interval_7"}],
+    [{"text": "14天", "callback_data": "set_interval_14"}, {"text": "30天", "callback_data": "set_interval_30"}],
+    [{"text": "🔙 返回", "callback_data": "config_schedule"}]
+  ]
+}'
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_set_interval() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local days="$4"
+    
+    answer_callback "$callback_id" "设置间隔..."
+    
+    # 更新配置文件
+    sed -i "s/^BACKUP_INTERVAL_DAYS=.*/BACKUP_INTERVAL_DAYS=\"$days\"/" "$CONFIG_FILE"
+    
+    # 重启定时器使配置生效
+    systemctl daemon-reload 2>/dev/null
+    systemctl restart snapsync-backup.timer 2>/dev/null
+    
+    local message="✅ <b>间隔已更新</b>
+
+备份间隔: ${days}天
+
+<b>⏭️ 下次运行:</b>
+$(systemctl list-timers snapsync-backup.timer 2>/dev/null | awk 'NR==2 {print $1" "$2}' || echo "N/A")
+
+<i>定时器已自动重启</i>"
+    
+    local keyboard='{
+  "inline_keyboard": [
+    [{"text": "🔙 返回定时任务配置", "callback_data": "config_schedule"}]
+  ]
+}'
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+# ===== 调整备份时间 =====
+handle_adjust_time() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "调整时间"
+    
+    source "$CONFIG_FILE"
+    
+    local current_time="${BACKUP_TIME:-03:00}"
+    
+    local message="🕐 <b>调整备份时间</b>
+
+<b>当前设置:</b> ${current_time}
+
+选择新的备份时间:
+
+<b>💡 建议:</b>
+• 凌晨时段: 服务器负载低
+• 避开业务高峰时段"
+
+    local keyboard='{
+  "inline_keyboard": [
+    [{"text": "00:00", "callback_data": "set_time_00:00"}, {"text": "01:00", "callback_data": "set_time_01:00"}, {"text": "02:00", "callback_data": "set_time_02:00"}],
+    [{"text": "03:00", "callback_data": "set_time_03:00"}, {"text": "04:00", "callback_data": "set_time_04:00"}, {"text": "05:00", "callback_data": "set_time_05:00"}],
+    [{"text": "06:00", "callback_data": "set_time_06:00"}, {"text": "12:00", "callback_data": "set_time_12:00"}, {"text": "18:00", "callback_data": "set_time_18:00"}],
+    [{"text": "🔙 返回", "callback_data": "config_schedule"}]
+  ]
+}'
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_set_time() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local time="$4"
+    
+    answer_callback "$callback_id" "设置时间..."
+    
+    # 更新配置文件
+    sed -i "s/^BACKUP_TIME=.*/BACKUP_TIME=\"$time\"/" "$CONFIG_FILE"
+    
+    # 更新 systemd timer 文件
+    cat > /etc/systemd/system/snapsync-backup.timer << EOF
+[Unit]
+Description=SnapSync Backup Timer
+
+[Timer]
+OnCalendar=*-*-* ${time}:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    
+    # 重启定时器
+    systemctl daemon-reload 2>/dev/null
+    systemctl restart snapsync-backup.timer 2>/dev/null
+    
+    local message="✅ <b>时间已更新</b>
+
+备份时间: ${time}
+
+<b>⏭️ 下次运行:</b>
+$(systemctl list-timers snapsync-backup.timer 2>/dev/null | awk 'NR==2 {print $1" "$2}' || echo "N/A")
+
+<i>定时器已自动重启</i>"
+    
+    local keyboard='{
+  "inline_keyboard": [
+    [{"text": "🔙 返回定时任务配置", "callback_data": "config_schedule"}]
+  ]
+}'
+    
+    edit_message "$chat_id" "$message_id" "$message" "$keyboard"
+}
+
+handle_toggle_auto() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    local action="$4"
+    
+    answer_callback "$callback_id" "切换中..."
+    
+    local new_value="false"
+    [[ "$action" == "enable" ]] && new_value="true"
+    
+    sed -i "s/^AUTO_BACKUP_ENABLED=.*/AUTO_BACKUP_ENABLED=\"$new_value\"/" "$CONFIG_FILE"
+    
+    # 启用/禁用定时器
+    if [[ "$new_value" == "true" ]]; then
+        systemctl enable snapsync-backup.timer 2>/dev/null
+        systemctl start snapsync-backup.timer 2>/dev/null
+    else
+        systemctl disable snapsync-backup.timer 2>/dev/null
+        systemctl stop snapsync-backup.timer 2>/dev/null
+    fi
+    
+    source "$CONFIG_FILE"
+    
+    local status_text="🔴 已禁用"
+    [[ "$new_value" == "true" ]] && status_text="🟢 已启用"
+    
+    local message="✅ <b>配置已更新</b>
+
+自动备份: ${status_text}
+
+<i>定时器已${new_value}}</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
+handle_restart_timer() {
+    local chat_id="$1"
+    local message_id="$2"
+    local callback_id="$3"
+    
+    answer_callback "$callback_id" "重启中..."
+    
+    systemctl daemon-reload 2>/dev/null
+    systemctl restart snapsync-backup.timer 2>/dev/null
+    
+    local message="✅ <b>定时器已重启</b>
+
+<i>返回配置菜单查看状态</i>"
+    
+    edit_message "$chat_id" "$message_id" "$message" "$(get_back_button)"
+}
+
 handle_menu_help() {
     local chat_id="$1"
     local message_id="$2"
@@ -1010,7 +1279,7 @@ handle_menu_help() {
 <b>📸 快照管理</b>
 • 创建: 系统完整备份
 • 列表: 查看所有快照
-• 恢复: 还原系统状态（本地/远程）
+• 恢复: 还原系统状态
 • 删除: 清理旧快照
 
 <b>⚙️ 配置管理</b>
@@ -1056,7 +1325,6 @@ handle_message() {
     esac
 }
 
-# ===== 回调路由 =====
 handle_callback() {
     local chat_id="$1"
     local message_id="$2"
@@ -1074,60 +1342,64 @@ handle_callback() {
         menu_delete) handle_menu_delete "$chat_id" "$message_id" "$callback_id" ;;
         menu_config) handle_menu_config "$chat_id" "$message_id" "$callback_id" ;;
         menu_help) handle_menu_help "$chat_id" "$message_id" "$callback_id" ;;
-        
         confirm_create) handle_confirm_create "$chat_id" "$message_id" "$callback_id" ;;
-        
-        # 恢复 - 选择来源
-        restore_source_local) handle_restore_source_local "$chat_id" "$message_id" "$callback_id" ;;
-        restore_source_remote) handle_restore_source_remote "$chat_id" "$message_id" "$callback_id" ;;
-        
-        # 恢复 - 本地快照
-        restore_local_*)
-            local id="${data#restore_local_}"
-            handle_restore_local "$chat_id" "$message_id" "$callback_id" "$id"
+        config_view) handle_config_view "$chat_id" "$message_id" "$callback_id" ;;
+        restore_*)
+            local id="${data#restore_}"
+            handle_restore_snapshot "$chat_id" "$message_id" "$callback_id" "$id"
             ;;
-        
-        # 恢复 - 远程快照
-        restore_remote_*)
-            local id="${data#restore_remote_}"
-            handle_restore_remote "$chat_id" "$message_id" "$callback_id" "$id"
+        confirm_restore_smart_*)
+            local id="${data#confirm_restore_smart_}"
+            handle_confirm_restore "$chat_id" "$message_id" "$callback_id" "smart" "$id"
             ;;
-        
-        # 确认恢复 - 本地智能
-        confirm_restore_local_smart_*)
-            local id="${data#confirm_restore_local_smart_}"
-            handle_confirm_restore "$chat_id" "$message_id" "$callback_id" "local" "smart" "$id"
+        confirm_restore_full_*)
+            local id="${data#confirm_restore_full_}"
+            handle_confirm_restore "$chat_id" "$message_id" "$callback_id" "full" "$id"
             ;;
-        
-        # 确认恢复 - 本地完全
-        confirm_restore_local_full_*)
-            local id="${data#confirm_restore_local_full_}"
-            handle_confirm_restore "$chat_id" "$message_id" "$callback_id" "local" "full" "$id"
-            ;;
-        
-        # 确认恢复 - 远程智能
-        confirm_restore_remote_smart_*)
-            local id="${data#confirm_restore_remote_smart_}"
-            handle_confirm_restore "$chat_id" "$message_id" "$callback_id" "remote" "smart" "$id"
-            ;;
-        
-        # 确认恢复 - 远程完全
-        confirm_restore_remote_full_*)
-            local id="${data#confirm_restore_remote_full_}"
-            handle_confirm_restore "$chat_id" "$message_id" "$callback_id" "remote" "full" "$id"
-            ;;
-        
-        # 删除快照
         delete_*)
             local id="${data#delete_}"
             handle_delete_snapshot "$chat_id" "$message_id" "$callback_id" "$id"
             ;;
-        
         confirm_delete_*)
             local id="${data#confirm_delete_}"
             handle_confirm_delete "$chat_id" "$message_id" "$callback_id" "$id"
             ;;
-        
+        config_telegram) handle_config_telegram "$chat_id" "$message_id" "$callback_id" ;;
+        config_remote) handle_config_remote "$chat_id" "$message_id" "$callback_id" ;;
+        config_local) handle_config_local "$chat_id" "$message_id" "$callback_id" ;;
+        config_schedule) handle_config_schedule "$chat_id" "$message_id" "$callback_id" ;;
+        config_view) handle_config_view "$chat_id" "$message_id" "$callback_id" ;;
+        toggle_telegram_*)
+            local action="${data#toggle_telegram_}"
+            handle_toggle_telegram "$chat_id" "$message_id" "$callback_id" "$action"
+            ;;
+        toggle_remote_*)
+            local action="${data#toggle_remote_}"
+            handle_toggle_remote "$chat_id" "$message_id" "$callback_id" "$action"
+            ;;
+        toggle_auto_*)
+            local action="${data#toggle_auto_}"
+            handle_toggle_auto "$chat_id" "$message_id" "$callback_id" "$action"
+            ;;
+        adjust_interval) handle_adjust_interval "$chat_id" "$message_id" "$callback_id" ;;
+        set_interval_*)
+            local days="${data#set_interval_}"
+            handle_set_interval "$chat_id" "$message_id" "$callback_id" "$days"
+            ;;
+        adjust_time) handle_adjust_time "$chat_id" "$message_id" "$callback_id" ;;
+        set_time_*)
+            local time="${data#set_time_}"
+            handle_set_time "$chat_id" "$message_id" "$callback_id" "$time"
+            ;;
+        set_compression_*)
+            local level="${data#set_compression_}"
+            handle_set_compression "$chat_id" "$message_id" "$callback_id" "$level"
+            ;;
+        set_keep_*)
+            local count="${data#set_keep_}"
+            handle_set_keep "$chat_id" "$message_id" "$callback_id" "$count"
+            ;;
+        restart_timer) handle_restart_timer "$chat_id" "$message_id" "$callback_id" ;;
         *) answer_callback "$callback_id" "未知操作" ;;
     esac
 }
@@ -1190,8 +1462,6 @@ load_state() {
 cleanup() {
     log_bot "收到停止信号，保存状态..."
     save_state
-    # 清理临时文件
-    rm -f /tmp/remote_snapshots_*.txt /tmp/remote_snapshot_selected_*.txt
     log_bot "Bot停止"
     exit 0
 }
