@@ -19,6 +19,10 @@ readonly NC='\033[0m'
 # ===== 加载配置 =====
 if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
+else
+    # 使用默认配置
+    BACKUP_DIR="/backups"
+    TELEGRAM_ENABLED="false"
 fi
 
 # ===== 工具函数 =====
