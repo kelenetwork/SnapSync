@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SnapSync v3.0 - 无损恢复模块（已修复）
-# 修复: 移除readonly冲突
+# 修复: 移除readonly冲突 + 修复恢复选择逻辑
 
 set -euo pipefail
 
@@ -37,7 +37,8 @@ log_warning() {
 }
 
 send_telegram() {
-    [[ "${TELEGRAM_ENABLED:-}" != "Y" && "${TELEGRAM_ENABLED:-}" != "true" ]] && return 0
+    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]] && return 0
     [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]] && return 0
     
     curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -70,30 +71,21 @@ load_config() {
     fi
 }
 
-# ===== 选择恢复方式 =====
-select_restore_method() {
-    echo ""
-    log_info "${CYAN}选择恢复方式${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}1)${NC} 📁 本地恢复"
-    echo -e "  ${GREEN}2)${NC} 🌐 远程恢复"
-    echo -e "  ${RED}0)${NC} 返回"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    
-    read -p "请选择 [0-2]: " choice
-    echo "$choice"
-}
-
 # ===== 列出本地快照 =====
 list_local_snapshots() {
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
-    [[ ! -d "$snapshot_dir" ]] && log_error "快照目录不存在" && return 1
+    if [[ ! -d "$snapshot_dir" ]]; then
+        log_error "快照目录不存在: $snapshot_dir"
+        return 1
+    fi
     
     local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
     
-    [[ ${#snapshots[@]} -eq 0 ]] && log_error "未找到快照" && return 1
+    if [[ ${#snapshots[@]} -eq 0 ]]; then
+        log_error "未找到快照"
+        return 1
+    fi
     
     echo ""
     log_info "${CYAN}可用本地快照:${NC}"
@@ -298,19 +290,12 @@ main() {
     
     load_config
     
-    # 选择方式
-    local method=$(select_restore_method)
+    # 直接列出并选择快照
+    local snapshot_file
+    snapshot_file=$(list_local_snapshots)
     
-    [[ "$method" == "0" ]] && log_info "已取消" && return 0
-    
-    local snapshot_file=""
-    
-    # 获取快照
-    if [[ "$method" == "1" ]]; then
-        snapshot_file=$(list_local_snapshots)
-        [[ -z "$snapshot_file" ]] && log_error "未选择快照" && return 1
-    else
-        log_error "远程恢复暂未实现"
+    if [[ -z "$snapshot_file" || ! -f "$snapshot_file" ]]; then
+        log_error "未选择有效快照"
         return 1
     fi
     
@@ -318,8 +303,8 @@ main() {
     echo ""
     log_info "${CYAN}选择恢复模式${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}1)${NC} 🛡️ 智能恢复（推荐）"
-    echo -e "  ${GREEN}2)${NC} 🔧 完全恢复"
+    echo -e "  ${GREEN}1)${NC} 🛡️ 智能恢复（推荐）- 保留网络和SSH配置"
+    echo -e "  ${GREEN}2)${NC} 🔧 完全恢复 - 恢复所有内容"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     
@@ -331,6 +316,9 @@ main() {
     # 确认
     echo ""
     log_warning "${RED}警告: 恢复不可撤销！${NC}"
+    echo ""
+    echo "即将恢复快照: $(basename "$snapshot_file")"
+    echo "恢复模式: $restore_mode"
     echo ""
     
     read -p "确认恢复? 输入 'YES': " final_confirm
