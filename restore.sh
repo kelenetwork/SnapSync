@@ -71,10 +71,10 @@ format_bytes() {
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        BACKUP_DIR="${BACKUP_DIR:-/backups}"
+        BACKUP_DIR="${BACKUP_DIR:-/backups/system_snapshots}"
         log_info "配置已加载: 备份目录 = $BACKUP_DIR"
     else
-        BACKUP_DIR="/backups"
+        BACKUP_DIR="/backups/system_snapshots"
         log_warning "配置文件不存在，使用默认: $BACKUP_DIR"
     fi
 }
