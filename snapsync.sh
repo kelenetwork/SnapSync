@@ -702,17 +702,20 @@ show_system_info() {
 }
 
 # ===== 9. 完全卸载 =====
-# ===== 9. 完全卸载（修复版） =====
+# ===== 9. 完全卸载（修复版 - 包含源代码清理） =====
 uninstall_snapsync() {
     show_header
     log "${RED}🧹 完全卸载 SnapSync${NC}"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     
-    # 先加载配置获取备份目录
+    # 先加载配置获取备份目录和安装源路径
     local backup_dir="/backups"
+    local source_path=""
+    
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
         backup_dir="${BACKUP_DIR:-/backups}"
+        source_path="${INSTALL_SOURCE_PATH:-}"
     fi
     
     echo -e "${YELLOW}警告: 此操作将删除以下内容:${NC}"
@@ -721,9 +724,15 @@ uninstall_snapsync() {
     echo "  • 日志文件 ($LOG_DIR)"
     echo "  • 系统服务文件"
     echo "  • 命令快捷方式"
+    
+    # 如果找到了安装源路径，询问是否删除
+    if [[ -n "$source_path" && -d "$source_path" ]]; then
+        echo "  • 安装源代码 ($source_path)"
+    fi
+    
     echo ""
     echo -e "${GREEN}不会删除:${NC}"
-    echo "  • 备份文件 ($backup_dir)"
+    echo "  • 备份文件 ($backup_dir) - 将单独询问"
     echo ""
     
     read -p "确认卸载? 输入 'YES' 继续: " confirm
@@ -739,7 +748,7 @@ uninstall_snapsync() {
     echo ""
     
     # 1. 停止服务
-    log "1/8 停止服务..."
+    log "1/9 停止服务..."
     systemctl stop snapsync-backup.timer 2>/dev/null || true
     systemctl stop snapsync-backup.service 2>/dev/null || true
     systemctl stop snapsync-bot.service 2>/dev/null || true
@@ -747,7 +756,7 @@ uninstall_snapsync() {
     sleep 1
     
     # 2. 禁用服务
-    log "2/8 禁用服务..."
+    log "2/9 禁用服务..."
     systemctl disable snapsync-backup.timer 2>/dev/null || true
     systemctl disable snapsync-backup.service 2>/dev/null || true
     systemctl disable snapsync-bot.service 2>/dev/null || true
@@ -755,7 +764,7 @@ uninstall_snapsync() {
     sleep 1
     
     # 3. 删除服务文件
-    log "3/8 删除服务文件..."
+    log "3/9 删除服务文件..."
     rm -f /etc/systemd/system/snapsync-backup.service 2>/dev/null || true
     rm -f /etc/systemd/system/snapsync-backup.timer 2>/dev/null || true
     rm -f /etc/systemd/system/snapsync-bot.service 2>/dev/null || true
@@ -764,7 +773,7 @@ uninstall_snapsync() {
     sleep 1
     
     # 4. 删除命令
-    log "4/8 删除命令..."
+    log "4/9 删除命令..."
     rm -f /usr/local/bin/snapsync 2>/dev/null || true
     rm -f /usr/local/bin/snapsync-backup 2>/dev/null || true
     rm -f /usr/local/bin/snapsync-restore 2>/dev/null || true
@@ -773,7 +782,7 @@ uninstall_snapsync() {
     sleep 1
     
     # 5. 删除程序文件
-    log "5/8 删除程序文件..."
+    log "5/9 删除程序文件..."
     if [[ -d "$INSTALL_DIR" ]]; then
         rm -rf "$INSTALL_DIR" 2>/dev/null || true
         log "${GREEN}✓ 程序文件已删除 ($INSTALL_DIR)${NC}"
@@ -782,8 +791,84 @@ uninstall_snapsync() {
     fi
     sleep 1
     
-    # 6. 配置文件
-    log "6/8 处理配置文件..."
+    # 6. 删除安装源代码
+    log "6/9 处理安装源代码..."
+    
+    if [[ -n "$source_path" && -d "$source_path" ]]; then
+        echo ""
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}发现安装源代码${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "路径: $source_path"
+        
+        # 检查是否看起来像 SnapSync 目录
+        if [[ -f "$source_path/install.sh" ]] || [[ -f "$source_path/snapsync.sh" ]]; then
+            echo "状态: 已验证为 SnapSync 源代码"
+            echo ""
+            read -p "是否删除源代码目录? [y/N]: " del_source
+            
+            if [[ "$del_source" =~ ^[Yy]$ ]]; then
+                if rm -rf "$source_path" 2>/dev/null; then
+                    log "${GREEN}✓ 源代码已删除 ($source_path)${NC}"
+                else
+                    log "${RED}✗ 源代码删除失败${NC}"
+                    echo "  可能需要手动删除: ${CYAN}sudo rm -rf $source_path${NC}"
+                fi
+            else
+                log "${YELLOW}⊙ 源代码已保留 ($source_path)${NC}"
+            fi
+        else
+            log "${YELLOW}⚠ 路径不像 SnapSync 目录，跳过删除${NC}"
+        fi
+    else
+        # 如果配置文件中没有记录，询问用户
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}未找到安装源路径记录${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "如果您知道源代码位置（例如 /root/SnapSync），"
+        echo "可以手动输入路径进行删除"
+        echo ""
+        read -p "是否删除源代码? [y/N]: " want_del_source
+        
+        if [[ "$want_del_source" =~ ^[Yy]$ ]]; then
+            read -p "请输入完整路径（例如: /root/SnapSync）: " manual_source_path
+            
+            if [[ -n "$manual_source_path" && -d "$manual_source_path" ]]; then
+                # 安全检查
+                if [[ "$manual_source_path" == "/" ]] || [[ "$manual_source_path" == "/root" ]] || \
+                   [[ "$manual_source_path" == "/home" ]] || [[ "$manual_source_path" == "/etc" ]]; then
+                    log "${RED}✗ 拒绝删除系统关键目录${NC}"
+                else
+                    echo ""
+                    echo "即将删除: $manual_source_path"
+                    ls -lh "$manual_source_path" 2>/dev/null | head -5
+                    echo ""
+                    read -p "确认删除此目录? 输入 'YES': " confirm_del
+                    
+                    if [[ "$confirm_del" == "YES" ]]; then
+                        if rm -rf "$manual_source_path" 2>/dev/null; then
+                            log "${GREEN}✓ 源代码已删除 ($manual_source_path)${NC}"
+                        else
+                            log "${RED}✗ 删除失败${NC}"
+                        fi
+                    else
+                        log "${YELLOW}⊙ 已取消删除${NC}"
+                    fi
+                fi
+            else
+                log "${YELLOW}⊙ 路径无效或不存在${NC}"
+            fi
+        else
+            log "${YELLOW}⊙ 跳过源代码删除${NC}"
+        fi
+    fi
+    sleep 1
+    
+    # 7. 配置文件
+    log "7/9 处理配置文件..."
     echo ""
     read -p "是否删除配置文件? [y/N]: " del_config
     if [[ "$del_config" =~ ^[Yy]$ ]]; then
@@ -796,8 +881,8 @@ uninstall_snapsync() {
     fi
     sleep 1
     
-    # 7. 日志文件
-    log "7/8 处理日志文件..."
+    # 8. 日志文件
+    log "8/9 处理日志文件..."
     echo ""
     read -p "是否删除日志文件? [y/N]: " del_logs
     if [[ "$del_logs" =~ ^[Yy]$ ]]; then
@@ -810,10 +895,10 @@ uninstall_snapsync() {
     fi
     sleep 1
     
-    # 8. 备份文件
-    log "8/8 处理备份文件..."
+    # 9. 备份文件
+    log "9/9 处理备份文件..."
     if [[ -d "$backup_dir/system_snapshots" ]]; then
-        local backup_count=$(find "$backup_dir/system_snapshots" -name "*.tar*" 2>/dev/null | wc -l)
+        local backup_count=$(find "$backup_dir/system_snapshots" -name "*.tar*" -type f 2>/dev/null | wc -l)
         
         if (( backup_count > 0 )); then
             echo ""
