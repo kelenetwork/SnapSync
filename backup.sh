@@ -1,8 +1,10 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 备份模块（修复通知 + 多VPS支持）
-# 修复：Telegram通知功能
-# 新增：多VPS识别
+# SnapSync v3.0 - 备份模块（完整修复版）
+# 修复：
+# 1. log 函数输出到 stderr，避免污染 stdout
+# 2. SSH 连接强制使用密钥认证，禁用密码提示
+# 3. 快照路径捕获逻辑完善
 
 set -euo pipefail
 
@@ -21,41 +23,35 @@ NC='\033[0m'
 # ===== 初始化 =====
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# ===== 工具函数 =====
+# ===== 工具函数（修复：输出到 stderr）=====
 log_info() {
-    echo -e "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE"
+    # 输出到 stderr 和日志文件，避免污染 stdout
+    echo -e "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE" >&2
 }
 
 log_error() {
-    echo -e "$(date '+%F %T') ${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"
+    echo -e "$(date '+%F %T') ${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE" >&2
 }
 
 log_success() {
-    echo -e "$(date '+%F %T') ${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
+    echo -e "$(date '+%F %T') ${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE" >&2
 }
 
-# Telegram通知（修复版 - 支持大小写不敏感）
+# Telegram通知
 send_telegram() {
     local message="$1"
     
-    # 详细检查Telegram配置（转为小写后比较）
     local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
     if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
-        log_info "[TG] Telegram未启用 (TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-未设置})"
+        log_info "[TG] Telegram未启用"
         return 0
     fi
     
-    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-        log_error "[TG] BOT_TOKEN未设置"
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+        log_error "[TG] Telegram配置不完整"
         return 1
     fi
     
-    if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-        log_error "[TG] CHAT_ID未设置"
-        return 1
-    fi
-    
-    # 添加VPS标识（支持多VPS管理）
     local hostname="${HOSTNAME:-$(hostname)}"
     local vps_tag="🖥️ <b>${hostname}</b>"
     local full_message="${vps_tag}
@@ -64,7 +60,6 @@ ${message}"
     
     log_info "[TG] 发送通知..."
     
-    # 发送消息
     local response=$(curl -sS -m 15 -X POST \
         "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
@@ -72,7 +67,6 @@ ${message}"
         -d "parse_mode=HTML" \
         -d "disable_web_page_preview=true" 2>&1)
     
-    # 检查结果
     if echo "$response" | grep -q '"ok":true'; then
         log_success "[TG] 通知发送成功"
         return 0
@@ -82,63 +76,6 @@ ${message}"
     fi
 }
 
-# 测试Telegram连接
-test_telegram() {
-    log_info "${CYAN}测试 Telegram 连接...${NC}"
-    
-    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
-    if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
-        log_info "Telegram未启用，跳过测试"
-        return 0
-    fi
-    
-    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-        log_error "Telegram配置不完整"
-        echo ""
-        echo "当前配置:"
-        echo "  TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-未设置}"
-        echo "  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:20}... (${#TELEGRAM_BOT_TOKEN} 字符)"
-        echo "  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-未设置}"
-        echo ""
-        return 1
-    fi
-    
-    # 测试API
-    log_info "测试 Bot API..."
-    local test_response=$(curl -sS -m 10 \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>&1)
-    
-    if echo "$test_response" | grep -q '"ok":true'; then
-        local bot_name=$(echo "$test_response" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
-        log_success "Bot连接成功: @${bot_name}"
-        
-        # 发送测试消息
-        log_info "发送测试消息..."
-        if send_telegram "🔍 <b>连接测试</b>
-
-✅ Telegram通知功能正常
-⏰ 测试时间: $(date '+%Y-%m-%d %H:%M:%S')
-
-备份任务将发送通知到此会话"; then
-            log_success "测试消息发送成功！"
-            return 0
-        else
-            log_error "测试消息发送失败"
-            return 1
-        fi
-    else
-        log_error "Bot API测试失败: $test_response"
-        echo ""
-        echo "可能的原因："
-        echo "  1. Bot Token 错误"
-        echo "  2. Bot 被删除"
-        echo "  3. 网络连接问题"
-        echo ""
-        return 1
-    fi
-}
-
-# 字节格式化
 format_bytes() {
     local bytes="$1"
     [[ ! "$bytes" =~ ^[0-9]+$ ]] && echo "0B" && return
@@ -199,11 +136,11 @@ load_config() {
     ENABLE_VERIFICATION="${ENABLE_VERIFICATION:-true}"
     HOSTNAME="${HOSTNAME:-$(hostname)}"
     
-    # 显示配置摘要
     log_info "配置加载完成"
     log_info "  主机: $HOSTNAME"
     log_info "  备份目录: $BACKUP_DIR"
     log_info "  Telegram: ${TELEGRAM_ENABLED:-false}"
+    log_info "  远程备份: ${REMOTE_ENABLED:-false}"
 }
 
 # ===== 系统检查 =====
@@ -243,7 +180,6 @@ create_snapshot() {
     log_info "${CYAN}开始创建系统快照${NC}"
     log_info "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    # 发送开始通知
     send_telegram "🔄 <b>开始备份</b>
 
 📸 快照名称: ${snapshot_name}
@@ -355,7 +291,7 @@ create_snapshot() {
         log_info "✓ SHA256: ${checksum:0:16}..."
     fi
     
-    # 发送成功通知（详细信息）
+    # 发送成功通知
     local speed="N/A"
     if (( duration > 0 )); then
         local speed_bps=$((size / duration))
@@ -373,13 +309,15 @@ create_snapshot() {
 
 快照已保存到: $snapshot_dir"
     
+    # 只输出文件路径到 stdout
     echo "$snapshot_file"
+    return 0
 }
 
-# ===== 上传远程 =====
+# ===== 上传远程（修复：强制使用密钥认证）=====
 upload_to_remote() {
     local snapshot_file="$1"
-    [[ ! -f "$snapshot_file" ]] && log_error "快照不存在" && return 1
+    [[ ! -f "$snapshot_file" ]] && log_error "快照不存在: $snapshot_file" && return 1
     
     log_info "${CYAN}开始上传到远程服务器${NC}"
     
@@ -396,10 +334,37 @@ upload_to_remote() {
 上传进行中..."
     
     local ssh_key="/root/.ssh/id_ed25519"
-    local ssh_opts="-o ConnectTimeout=30 -o StrictHostKeyChecking=no"
+    
+    # 检查密钥文件
+    if [[ ! -f "$ssh_key" ]]; then
+        log_error "SSH 密钥不存在: $ssh_key"
+        send_telegram "❌ <b>上传失败</b>
+
+原因: SSH 密钥未配置
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+请运行配置向导:
+sudo snapsync
+选择: 3) 配置管理 -> 1) 修改远程服务器配置"
+        return 1
+    fi
+    
+    # 修复：强制使用密钥认证，禁用密码提示
+    local ssh_opts=(
+        "-o" "StrictHostKeyChecking=no"
+        "-o" "UserKnownHostsFile=/dev/null"
+        "-o" "PasswordAuthentication=no"
+        "-o" "PreferredAuthentications=publickey"
+        "-o" "PubkeyAuthentication=yes"
+        "-o" "BatchMode=yes"
+        "-o" "ConnectTimeout=30"
+        "-o" "LogLevel=ERROR"
+    )
     
     # 测试连接
-    if ! ssh -i "$ssh_key" -p "$REMOTE_PORT" $ssh_opts "${REMOTE_USER}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
+    log_info "测试 SSH 连接..."
+    if ! ssh -i "$ssh_key" -p "$REMOTE_PORT" "${ssh_opts[@]}" \
+            "${REMOTE_USER}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
         log_error "无法连接远程服务器"
         send_telegram "❌ <b>上传失败</b>
 
@@ -408,23 +373,39 @@ upload_to_remote() {
 ⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
 
 请检查：
-- SSH密钥配置
-- 网络连接
-- 远程服务器状态"
+- SSH密钥是否已添加到远程服务器
+- 远程服务器是否可达
+- 网络连接是否正常
+
+测试命令:
+ssh -i $ssh_key -p $REMOTE_PORT ${REMOTE_USER}@${REMOTE_HOST}"
         return 1
     fi
     
+    log_success "SSH 连接测试成功"
+    
     # 创建远程目录
-    ssh -i "$ssh_key" -p "$REMOTE_PORT" $ssh_opts "${REMOTE_USER}@${REMOTE_HOST}" \
+    log_info "创建远程目录..."
+    ssh -i "$ssh_key" -p "$REMOTE_PORT" "${ssh_opts[@]}" \
+        "${REMOTE_USER}@${REMOTE_HOST}" \
         "mkdir -p '${REMOTE_PATH}/system_snapshots'" || true
     
     # 上传
     local upload_start=$(date +%s)
     
+    log_info "开始上传快照..."
+    
+    # 构建 rsync SSH 命令
+    local rsync_ssh_cmd="ssh -i $ssh_key -p $REMOTE_PORT"
+    for opt in "${ssh_opts[@]}"; do
+        rsync_ssh_cmd="$rsync_ssh_cmd $opt"
+    done
+    
     if rsync -avz --partial --progress \
-            -e "ssh -i $ssh_key -p $REMOTE_PORT $ssh_opts" \
-            "$snapshot_file" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/system_snapshots/" \
-            2>&1 | tee -a "$LOG_FILE"; then
+            -e "$rsync_ssh_cmd" \
+            "$snapshot_file" \
+            "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/system_snapshots/" \
+            2>&1 | tee -a "$LOG_FILE" >&2; then
         
         local upload_duration=$(($(date +%s) - upload_start))
         local upload_speed="N/A"
@@ -440,9 +421,12 @@ upload_to_remote() {
         log_info "  速度: $upload_speed"
         
         # 上传校验和
-        [[ -f "${snapshot_file}.sha256" ]] && \
-            rsync -az -e "ssh -i $ssh_key -p $REMOTE_PORT $ssh_opts" \
-                "${snapshot_file}.sha256" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/system_snapshots/" || true
+        if [[ -f "${snapshot_file}.sha256" ]]; then
+            log_info "上传校验文件..."
+            rsync -az -e "$rsync_ssh_cmd" \
+                "${snapshot_file}.sha256" \
+                "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PATH}/system_snapshots/" 2>&1 | tee -a "$LOG_FILE" >&2 || true
+        fi
         
         send_telegram "✅ <b>上传完成</b>
 
@@ -473,7 +457,13 @@ upload_to_remote() {
 clean_local_snapshots() {
     log_info "清理本地旧快照..."
     
-    local snapshots=($(find "${BACKUP_DIR}/system_snapshots" -name "system_snapshot_*.tar*" -type f 2>/dev/null | sort -r))
+    local snapshots=()
+    while IFS= read -r -d '' file; do
+        if [[ "$file" != *.sha256 ]]; then
+            snapshots+=("$file")
+        fi
+    done < <(find "${BACKUP_DIR}/system_snapshots" -name "system_snapshot_*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    
     local total=${#snapshots[@]}
     local keep=${LOCAL_KEEP_COUNT:-5}
     
@@ -491,15 +481,26 @@ clean_local_snapshots() {
     fi
 }
 
-# ===== 清理远程 =====
+# ===== 清理远程（修复：强制使用密钥认证）=====
 clean_remote_snapshots() {
     log_info "清理远程旧快照..."
     
     local ssh_key="/root/.ssh/id_ed25519"
-    local ssh_opts="-o ConnectTimeout=30 -o StrictHostKeyChecking=no"
     
-    ssh -i "$ssh_key" -p "$REMOTE_PORT" $ssh_opts "${REMOTE_USER}@${REMOTE_HOST}" \
-        "find '${REMOTE_PATH}/system_snapshots' -name '*.tar*' -mtime +${REMOTE_KEEP_DAYS:-30} -delete" \
+    local ssh_opts=(
+        "-o" "StrictHostKeyChecking=no"
+        "-o" "UserKnownHostsFile=/dev/null"
+        "-o" "PasswordAuthentication=no"
+        "-o" "PreferredAuthentications=publickey"
+        "-o" "PubkeyAuthentication=yes"
+        "-o" "BatchMode=yes"
+        "-o" "ConnectTimeout=30"
+        "-o" "LogLevel=ERROR"
+    )
+    
+    ssh -i "$ssh_key" -p "$REMOTE_PORT" "${ssh_opts[@]}" \
+        "${REMOTE_USER}@${REMOTE_HOST}" \
+        "find '${REMOTE_PATH}/system_snapshots' -name '*.tar*' -type f -mtime +${REMOTE_KEEP_DAYS:-30} -delete" \
         2>/dev/null || true
     
     log_info "远程清理完成 (保留${REMOTE_KEEP_DAYS:-30}天)"
@@ -515,31 +516,48 @@ main() {
     acquire_lock
     load_config
     
-    # 测试Telegram（仅在启用时）
-    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
-    if [[ "$tg_enabled" == "y" || "$tg_enabled" == "yes" || "$tg_enabled" == "true" ]]; then
-        test_telegram || log_error "Telegram测试失败，但继续备份"
-    fi
-    
+    # 创建快照并捕获文件路径
     local snapshot_file
-    if snapshot_file=$(create_snapshot); then
+    snapshot_file=$(create_snapshot)
+    local create_status=$?
+    
+    # 验证快照创建结果
+    if [[ $create_status -eq 0 && -n "$snapshot_file" && -f "$snapshot_file" ]]; then
         log_success "快照创建成功: $snapshot_file"
     else
-        log_error "快照创建失败"
+        log_error "快照创建失败 (状态码: $create_status, 文件: ${snapshot_file:-未生成})"
         exit 1
     fi
     
     clean_local_snapshots
     
-    # 上传（如果启用）
+    # 判断是否上传
     local remote_enabled=$(echo "${REMOTE_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    local should_upload="no"
+    
     if [[ "$remote_enabled" == "y" || "$remote_enabled" == "yes" || "$remote_enabled" == "true" ]]; then
-        local upload_remote=$(echo "${UPLOAD_REMOTE:-Y}" | tr '[:upper:]' '[:lower:]')
-        if [[ "$upload_remote" == "y" || "$upload_remote" == "yes" ]]; then
-            upload_to_remote "$snapshot_file" || log_error "上传失败"
+        if [[ -n "${UPLOAD_REMOTE:-}" ]]; then
+            local upload_choice=$(echo "${UPLOAD_REMOTE}" | tr '[:upper:]' '[:lower:]')
+            if [[ "$upload_choice" == "y" || "$upload_choice" == "yes" ]]; then
+                should_upload="yes"
+            fi
         else
-            log_info "跳过远程上传（用户选择）"
+            should_upload="yes"
         fi
+    fi
+    
+    # 执行上传
+    if [[ "$should_upload" == "yes" ]]; then
+        log_info "准备上传到远程服务器..."
+        log_info "快照文件: $snapshot_file"
+        
+        if [[ -f "$snapshot_file" ]]; then
+            upload_to_remote "$snapshot_file" || log_error "上传失败（本地备份已完成）"
+        else
+            log_error "快照文件丢失，无法上传: $snapshot_file"
+        fi
+    else
+        log_info "跳过远程上传"
     fi
     
     log_info "========================================"
