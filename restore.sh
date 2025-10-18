@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 无损恢复模块（终极修复版）
-# 修复：路径处理 + 最简单可靠的方法
+# SnapSync v3.0 - 无损恢复模块（路径修复版）
+# 修复：BACKUP_DIR 默认值错误导致路径重复
 
 set -euo pipefail
 
@@ -67,19 +67,22 @@ format_bytes() {
     fi
 }
 
-# ===== 加载配置 =====
+# ===== 加载配置（修复版 - 正确的默认路径）=====
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        BACKUP_DIR="${BACKUP_DIR:-/backups/system_snapshots}"
+        BACKUP_DIR="${BACKUP_DIR:-/backups}"  # ✓ 修复：改为 /backups
         log_info "配置已加载: 备份目录 = $BACKUP_DIR"
     else
-        BACKUP_DIR="/backups/system_snapshots"
+        BACKUP_DIR="/backups"  # ✓ 修复：改为 /backups
         log_warning "配置文件不存在，使用默认: $BACKUP_DIR"
     fi
+    
+    # 调试信息
+    log_info "快照目录将是: ${BACKUP_DIR}/system_snapshots"
 }
 
-# ===== 列出本地快照（终极修复版 - 使用绝对路径）=====
+# ===== 列出本地快照（调试增强版）=====
 list_local_snapshots() {
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
@@ -96,11 +99,16 @@ list_local_snapshots() {
         echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "目录路径: $snapshot_dir"
+        echo "配置的备份目录: $BACKUP_DIR"
+        echo ""
+        echo "调试信息："
+        echo "  检查父目录："
+        ls -la "$BACKUP_DIR" 2>/dev/null | head -10 || echo "  父目录不存在"
         echo ""
         return 1
     fi
     
-    log_info "正在查找快照文件（排除 .sha256）..."
+    log_info "目录存在，正在查找快照文件（排除 .sha256）..."
     
     # ===== 使用最简单的方法：直接在目标目录里用 ls =====
     local snapshots=()
@@ -113,17 +121,19 @@ list_local_snapshots() {
     }
     
     # 获取所有 .tar* 文件，排除 .sha256，按时间倒序
+    log_info "执行: ls -t system_snapshot_*.tar* | grep -v '.sha256\$'"
     for file in $(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$'); do
         # 使用绝对路径
         if [[ -f "$file" ]]; then
             snapshots+=("${snapshot_dir}/${file}")
+            log_info "找到快照: ${file}"
         fi
     done
     
     # 返回原目录
     cd "$current_dir"
     
-    log_info "找到 ${#snapshots[@]} 个快照文件"
+    log_info "总共找到 ${#snapshots[@]} 个快照文件"
     
     # 检查结果
     if [[ ${#snapshots[@]} -eq 0 ]]; then
@@ -134,10 +144,15 @@ list_local_snapshots() {
         echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "快照目录: $snapshot_dir"
+        echo "配置的备份目录: $BACKUP_DIR"
         echo ""
         echo "调试信息："
-        echo "  目录内容："
-        ls -lh "$snapshot_dir" 2>/dev/null | head -10 || echo "  无法读取"
+        echo "  目录内容（包含.sha256）："
+        ls -lh "$snapshot_dir" 2>/dev/null | head -15 || echo "  无法读取"
+        echo ""
+        echo "  统计："
+        echo "    .tar.gz 文件: $(find "$snapshot_dir" -name "*.tar.gz" 2>/dev/null | wc -l)"
+        echo "    .sha256 文件: $(find "$snapshot_dir" -name "*.sha256" 2>/dev/null | wc -l)"
         echo ""
         return 1
     fi
