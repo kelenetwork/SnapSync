@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 无损恢复模块（最终修复版）
-# 修复：使用最兼容的 find 方法 + 隐藏 SHA256 文件
+# SnapSync v3.0 - 无损恢复模块（终极修复版）
+# 修复：路径处理 + 最简单可靠的方法
 
 set -euo pipefail
 
@@ -79,7 +79,7 @@ load_config() {
     fi
 }
 
-# ===== 列出本地快照（最终修复版 - 最兼容的方法）=====
+# ===== 列出本地快照（终极修复版 - 使用绝对路径）=====
 list_local_snapshots() {
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
@@ -97,43 +97,31 @@ list_local_snapshots() {
         echo ""
         echo "目录路径: $snapshot_dir"
         echo ""
-        echo "可能的原因："
-        echo "  1. 还没有创建过快照"
-        echo "  2. 备份目录配置错误"
-        echo ""
-        echo "解决方法："
-        echo "  • 创建快照: ${CYAN}sudo snapsync-backup${NC}"
-        echo "  • 检查配置: ${CYAN}sudo cat $CONFIG_FILE | grep BACKUP_DIR${NC}"
-        echo ""
         return 1
     fi
     
     log_info "正在查找快照文件（排除 .sha256）..."
     
-    # ===== 使用最兼容的方法：ls + grep =====
-    # 1. 排除 .sha256 文件
-    # 2. 按时间倒序排序
-    # 3. 只显示文件名
-    
+    # ===== 使用最简单的方法：直接在目标目录里用 ls =====
     local snapshots=()
+    local current_dir=$(pwd)
     
-    # 切换到快照目录
+    # 进入快照目录并获取文件列表
     cd "$snapshot_dir" || {
         log_error "无法进入目录: $snapshot_dir"
         return 1
     }
     
-    # 使用 ls -t（按时间排序）获取文件列表
-    # grep 排除 .sha256 文件
-    while IFS= read -r file; do
-        # 确保是文件且不是 .sha256
-        if [[ -f "$file" && "$file" != *.sha256 ]]; then
-            snapshots+=("$snapshot_dir/$file")
+    # 获取所有 .tar* 文件，排除 .sha256，按时间倒序
+    for file in $(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$'); do
+        # 使用绝对路径
+        if [[ -f "$file" ]]; then
+            snapshots+=("${snapshot_dir}/${file}")
         fi
-    done < <(ls -t system_snapshot_*.tar* 2>/dev/null | grep -v '\.sha256$')
+    done
     
-    # 回到根目录
-    cd - >/dev/null
+    # 返回原目录
+    cd "$current_dir"
     
     log_info "找到 ${#snapshots[@]} 个快照文件"
     
@@ -148,15 +136,8 @@ list_local_snapshots() {
         echo "快照目录: $snapshot_dir"
         echo ""
         echo "调试信息："
-        echo "  ls 命令输出："
-        ls -lh "$snapshot_dir" 2>/dev/null | head -10 || echo "  目录为空"
-        echo ""
-        echo "  查找 .tar* 文件："
-        find "$snapshot_dir" -maxdepth 1 -name "*.tar*" -type f 2>/dev/null | head -5 || echo "  未找到"
-        echo ""
-        echo "提示："
-        echo "  • 创建第一个快照: ${CYAN}sudo snapsync-backup${NC}"
-        echo "  • 查看备份日志: ${CYAN}sudo tail -50 /var/log/snapsync/backup.log${NC}"
+        echo "  目录内容："
+        ls -lh "$snapshot_dir" 2>/dev/null | head -10 || echo "  无法读取"
         echo ""
         return 1
     fi
@@ -175,7 +156,7 @@ list_local_snapshots() {
         local size=$(format_bytes "$size_bytes")
         local date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
         
-        # 校验状态（只作为标记，不显示 .sha256 文件）
+        # 校验状态
         local checksum_status=""
         if [[ -f "${file}.sha256" ]]; then
             checksum_status="${GREEN}✓ 已校验${NC}"
