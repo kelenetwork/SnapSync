@@ -702,19 +702,28 @@ show_system_info() {
 }
 
 # ===== 9. 完全卸载 =====
+# ===== 9. 完全卸载（修复版） =====
 uninstall_snapsync() {
     show_header
     log "${RED}🧹 完全卸载 SnapSync${NC}"
     echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     
+    # 先加载配置获取备份目录
+    local backup_dir="/backups"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+        backup_dir="${BACKUP_DIR:-/backups}"
+    fi
+    
     echo -e "${YELLOW}警告: 此操作将删除以下内容:${NC}"
     echo "  • 所有程序文件 ($INSTALL_DIR)"
     echo "  • 配置文件 ($CONFIG_DIR)"
     echo "  • 日志文件 ($LOG_DIR)"
-    echo "  • 系统服务"
+    echo "  • 系统服务文件"
     echo "  • 命令快捷方式"
     echo ""
-    echo -e "${RED}注意: 备份文件不会被删除${NC}"
+    echo -e "${GREEN}不会删除:${NC}"
+    echo "  • 备份文件 ($backup_dir)"
     echo ""
     
     read -p "确认卸载? 输入 'YES' 继续: " confirm
@@ -727,75 +736,114 @@ uninstall_snapsync() {
     
     log ""
     log "${YELLOW}开始卸载...${NC}"
+    echo ""
     
-    # 停止服务
-    log "停止服务..."
+    # 1. 停止服务
+    log "1/8 停止服务..."
     systemctl stop snapsync-backup.timer 2>/dev/null || true
     systemctl stop snapsync-backup.service 2>/dev/null || true
     systemctl stop snapsync-bot.service 2>/dev/null || true
+    log "${GREEN}✓ 服务已停止${NC}"
+    sleep 1
     
-    # 禁用服务
-    log "禁用服务..."
+    # 2. 禁用服务
+    log "2/8 禁用服务..."
     systemctl disable snapsync-backup.timer 2>/dev/null || true
+    systemctl disable snapsync-backup.service 2>/dev/null || true
     systemctl disable snapsync-bot.service 2>/dev/null || true
+    log "${GREEN}✓ 服务已禁用${NC}"
+    sleep 1
     
-    # 删除服务文件
-    log "删除服务文件..."
-    rm -f /etc/systemd/system/snapsync-*.service
-    rm -f /etc/systemd/system/snapsync-*.timer
-    systemctl daemon-reload
+    # 3. 删除服务文件
+    log "3/8 删除服务文件..."
+    rm -f /etc/systemd/system/snapsync-backup.service 2>/dev/null || true
+    rm -f /etc/systemd/system/snapsync-backup.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/snapsync-bot.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    log "${GREEN}✓ 服务文件已删除${NC}"
+    sleep 1
     
-    # 删除命令
-    log "删除命令..."
-    rm -f /usr/local/bin/snapsync
-    rm -f /usr/local/bin/snapsync-backup
-    rm -f /usr/local/bin/snapsync-restore
+    # 4. 删除命令
+    log "4/8 删除命令..."
+    rm -f /usr/local/bin/snapsync 2>/dev/null || true
+    rm -f /usr/local/bin/snapsync-backup 2>/dev/null || true
+    rm -f /usr/local/bin/snapsync-restore 2>/dev/null || true
+    rm -f /usr/local/bin/telegram-test 2>/dev/null || true
+    log "${GREEN}✓ 命令已删除${NC}"
+    sleep 1
     
-    # 删除程序文件
-    log "删除程序文件..."
-    rm -rf "$INSTALL_DIR"
+    # 5. 删除程序文件
+    log "5/8 删除程序文件..."
+    if [[ -d "$INSTALL_DIR" ]]; then
+        rm -rf "$INSTALL_DIR" 2>/dev/null || true
+        log "${GREEN}✓ 程序文件已删除 ($INSTALL_DIR)${NC}"
+    else
+        log "${YELLOW}⚠ 程序目录不存在${NC}"
+    fi
+    sleep 1
     
-    # 询问是否删除配置和日志
+    # 6. 配置文件
+    log "6/8 处理配置文件..."
     echo ""
     read -p "是否删除配置文件? [y/N]: " del_config
     if [[ "$del_config" =~ ^[Yy]$ ]]; then
-        rm -rf "$CONFIG_DIR"
-        log "✓ 配置文件已删除"
+        if [[ -d "$CONFIG_DIR" ]]; then
+            rm -rf "$CONFIG_DIR" 2>/dev/null || true
+            log "${GREEN}✓ 配置文件已删除 ($CONFIG_DIR)${NC}"
+        fi
+    else
+        log "${YELLOW}⊙ 配置文件已保留 ($CONFIG_DIR)${NC}"
     fi
+    sleep 1
     
+    # 7. 日志文件
+    log "7/8 处理日志文件..."
+    echo ""
     read -p "是否删除日志文件? [y/N]: " del_logs
     if [[ "$del_logs" =~ ^[Yy]$ ]]; then
-        rm -rf "$LOG_DIR"
-        log "✓ 日志文件已删除"
+        if [[ -d "$LOG_DIR" ]]; then
+            rm -rf "$LOG_DIR" 2>/dev/null || true
+            log "${GREEN}✓ 日志文件已删除 ($LOG_DIR)${NC}"
+        fi
+    else
+        log "${YELLOW}⊙ 日志文件已保留 ($LOG_DIR)${NC}"
     fi
+    sleep 1
     
-    # 询问是否删除备份
-    echo ""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-        local backup_count=$(find "${BACKUP_DIR}/system_snapshots" -name "*.tar*" 2>/dev/null | wc -l)
+    # 8. 备份文件
+    log "8/8 处理备份文件..."
+    if [[ -d "$backup_dir/system_snapshots" ]]; then
+        local backup_count=$(find "$backup_dir/system_snapshots" -name "*.tar*" 2>/dev/null | wc -l)
         
         if (( backup_count > 0 )); then
+            echo ""
             log "${YELLOW}警告: 发现 $backup_count 个备份文件${NC}"
+            echo ""
             read -p "是否删除所有备份? [y/N]: " del_backups
+            
             if [[ "$del_backups" =~ ^[Yy]$ ]]; then
-                rm -rf "${BACKUP_DIR}/system_snapshots"
-                rm -rf "${BACKUP_DIR}/metadata"
-                rm -rf "${BACKUP_DIR}/checksums"
-                log "✓ 备份文件已删除"
+                rm -rf "$backup_dir/system_snapshots" 2>/dev/null || true
+                rm -rf "$backup_dir/metadata" 2>/dev/null || true
+                rm -rf "$backup_dir/checksums" 2>/dev/null || true
+                log "${GREEN}✓ 备份文件已删除${NC}"
             else
-                log "${GREEN}备份文件已保留在: ${BACKUP_DIR}${NC}"
+                log "${GREEN}⊙ 备份文件已保留: $backup_dir${NC}"
             fi
+        else
+            log "${YELLOW}⊙ 未发现备份文件${NC}"
         fi
+    else
+        log "${YELLOW}⊙ 备份目录不存在${NC}"
     fi
     
-    log ""
+    # 完成
+    echo ""
     log "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${GREEN}✓ SnapSync 卸载完成${NC}"
+    log "${GREEN}✓ SnapSync 卸载完成！${NC}"
     log "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log ""
+    echo ""
     log "感谢使用 SnapSync!"
-    log ""
+    echo ""
     
     pause
     exit 0
