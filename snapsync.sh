@@ -1,30 +1,29 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 主控制脚本
-# 统一的系统快照管理控制台
+# SnapSync v3.0 - 主控制脚本（完整功能版）
+# 已实现所有菜单功能
 
 set -euo pipefail
 
 # ===== 颜色定义 =====
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[0;33m'
-readonly BLUE='\033[0;34m'
-readonly CYAN='\033[0;36m'
-readonly MAGENTA='\033[0;35m'
-readonly NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
 
 # ===== 路径定义 =====
-readonly INSTALL_DIR="/opt/snapsync"
-readonly CONFIG_DIR="/etc/snapsync"
-readonly CONFIG_FILE="$CONFIG_DIR/config.conf"
-readonly LOG_DIR="/var/log/snapsync"
-readonly MODULE_DIR="$INSTALL_DIR/modules"
-readonly BOT_DIR="$INSTALL_DIR/bot"
+INSTALL_DIR="/opt/snapsync"
+CONFIG_DIR="/etc/snapsync"
+CONFIG_FILE="$CONFIG_DIR/config.conf"
+LOG_DIR="/var/log/snapsync"
+MODULE_DIR="$INSTALL_DIR/modules"
 
 # ===== 权限检查 =====
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 请使用 root 权限运行此脚本${NC}"
+    echo -e "${RED}错误: 需要 root 权限${NC}"
     echo -e "${YELLOW}使用: sudo $0${NC}"
     exit 1
 fi
@@ -51,388 +50,15 @@ show_status_bar() {
         local disk_usage=$(df -h "$backup_dir" 2>/dev/null | awk 'NR==2 {print $5}' || echo "N/A")
         
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN}主机:${NC} $(hostname) ${GREEN}| 快照数:${NC} $snapshot_count ${GREEN}| 磁盘:${NC} $disk_usage"
+        echo -e "${GREEN}主机:${NC} $(hostname) ${GREEN}| 快照:${NC} $snapshot_count ${GREEN}| 磁盘:${NC} $disk_usage"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
     fi
 }
 
-# ===== 依赖检查和安装 =====
-check_and_install_dependencies() {
-    log "${CYAN}检查系统依赖...${NC}"
-    
-    # 检测包管理器
-    if command -v apt-get &> /dev/null; then
-        PKG_MANAGER="apt-get"
-        PKG_UPDATE="apt-get update -qq"
-        PKG_INSTALL="apt-get install -y -qq"
-    elif command -v yum &> /dev/null; then
-        PKG_MANAGER="yum"
-        PKG_UPDATE="yum makecache -q"
-        PKG_INSTALL="yum install -y -q"
-    elif command -v dnf &> /dev/null; then
-        PKG_MANAGER="dnf"
-        PKG_UPDATE="dnf makecache -q"
-        PKG_INSTALL="dnf install -y -q"
-    else
-        log "${RED}错误: 未检测到支持的包管理器${NC}"
-        exit 1
-    fi
-    
-    log "${GREEN}检测到包管理器: $PKG_MANAGER${NC}"
-    
-    # 基础工具
-    local required_tools=(
-        "curl" "tar" "gzip" "rsync" "jq" "bc"
-        "openssh-client:ssh" "findutils:find"
-    )
-    
-    # 可选但推荐的工具
-    local optional_tools=(
-        "pigz" "acl:getfacl" "attr:getfattr" "pv" "bzip2" "xz-utils:xz"
-    )
-    
-    # 更新包列表
-    log "${YELLOW}更新包列表...${NC}"
-    eval "$PKG_UPDATE" &>/dev/null || true
-    
-    # 检查和安装基础工具
-    log "${YELLOW}检查基础依赖...${NC}"
-    for tool_spec in "${required_tools[@]}"; do
-        local pkg_name="${tool_spec%%:*}"
-        local cmd_name="${tool_spec##*:}"
-        [[ "$cmd_name" == "$pkg_name" ]] && cmd_name="$pkg_name"
-        
-        if ! command -v "$cmd_name" &> /dev/null; then
-            log "${YELLOW}  安装 $pkg_name...${NC}"
-            if ! eval "$PKG_INSTALL $pkg_name" &>/dev/null; then
-                log "${RED}  警告: 无法安装 $pkg_name${NC}"
-            else
-                log "${GREEN}  ✓ $pkg_name 安装完成${NC}"
-            fi
-        else
-            log "${GREEN}  ✓ $cmd_name 已安装${NC}"
-        fi
-    done
-    
-    # 检查和安装可选工具
-    log "${YELLOW}检查可选依赖...${NC}"
-    for tool_spec in "${optional_tools[@]}"; do
-        local pkg_name="${tool_spec%%:*}"
-        local cmd_name="${tool_spec##*:}"
-        [[ "$cmd_name" == "$pkg_name" ]] && cmd_name="$pkg_name"
-        
-        if ! command -v "$cmd_name" &> /dev/null; then
-            log "${YELLOW}  安装 $pkg_name (可选)...${NC}"
-            eval "$PKG_INSTALL $pkg_name" &>/dev/null || log "${YELLOW}  跳过 $pkg_name${NC}"
-        fi
-    done
-    
-    log "${GREEN}✓ 依赖检查完成${NC}\n"
-}
-
-# ===== 初始化安装 =====
-initialize_installation() {
-    show_header
-    log "${CYAN}开始 SnapSync v3.0 初始化...${NC}\n"
-    
-    # 检查依赖
-    check_and_install_dependencies
-    
-    # 创建目录结构
-    log "${YELLOW}创建目录结构...${NC}"
-    mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR" "$MODULE_DIR" "$BOT_DIR"
-    mkdir -p "/backups/system_snapshots" "/backups/metadata" "/backups/checksums"
-    log "${GREEN}✓ 目录创建完成${NC}\n"
-    
-    # 配置向导
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        run_config_wizard
-    else
-        log "${YELLOW}检测到现有配置，跳过配置向导${NC}"
-        read -p "是否重新配置? [y/N]: " reconfigure
-        if [[ "$reconfigure" =~ ^[Yy]$ ]]; then
-            run_config_wizard
-        fi
-    fi
-    
-    # 安装模块
-    install_modules
-    
-    # 设置定时任务
-    setup_systemd_services
-    
-    log "${GREEN}\n✓ SnapSync v3.0 安装完成！${NC}\n"
-    log "${CYAN}运行 'sudo snapsync' 启动管理控制台${NC}"
-    
+pause() {
+    echo ""
     read -p "按 Enter 继续..."
-}
-
-# ===== 配置向导 =====
-run_config_wizard() {
-    log "${BLUE}━━━━━ 配置向导 ━━━━━${NC}\n"
-    
-    # Telegram 配置
-    log "${YELLOW}1. Telegram 通知配置${NC}"
-    read -p "启用 Telegram 通知? [Y/n]: " enable_tg
-    enable_tg=${enable_tg:-Y}
-    
-    if [[ "$enable_tg" =~ ^[Yy]$ ]]; then
-        read -p "Telegram Bot Token: " bot_token
-        read -p "Telegram Chat ID: " chat_id
-    else
-        bot_token=""
-        chat_id=""
-    fi
-    echo ""
-    
-    # 远程备份配置
-    log "${YELLOW}2. 远程备份配置${NC}"
-    read -p "启用远程备份? [Y/n]: " enable_remote
-    enable_remote=${enable_remote:-Y}
-    
-    if [[ "$enable_remote" =~ ^[Yy]$ ]]; then
-        read -p "远程服务器地址: " remote_host
-        read -p "远程用户名 [root]: " remote_user
-        remote_user=${remote_user:-root}
-        read -p "SSH 端口 [22]: " remote_port
-        remote_port=${remote_port:-22}
-        read -p "远程备份路径: " remote_path
-        
-        # SSH 认证方式
-        echo ""
-        echo "SSH 认证方式:"
-        echo "1) 密钥认证 (推荐)"
-        echo "2) 密码认证"
-        read -p "选择 [1-2]: " auth_type
-        
-        if [[ "$auth_type" == "1" ]]; then
-            setup_ssh_key "$remote_user" "$remote_host" "$remote_port"
-            use_password="false"
-        else
-            use_password="true"
-        fi
-    else
-        remote_host=""
-        remote_user=""
-        remote_port="22"
-        remote_path=""
-        use_password="false"
-    fi
-    echo ""
-    
-    # 本地备份配置
-    log "${YELLOW}3. 本地备份配置${NC}"
-    read -p "本地备份目录 [/backups]: " backup_dir
-    backup_dir=${backup_dir:-/backups}
-    
-    read -p "压缩级别 (1-9) [6]: " compression_level
-    compression_level=${compression_level:-6}
-    
-    read -p "保留本地快照数量 [5]: " local_keep
-    local_keep=${local_keep:-5}
-    echo ""
-    
-    # 定时任务配置
-    log "${YELLOW}4. 定时任务配置${NC}"
-    read -p "启用自动备份? [Y/n]: " enable_auto
-    enable_auto=${enable_auto:-Y}
-    
-    if [[ "$enable_auto" =~ ^[Yy]$ ]]; then
-        read -p "备份间隔 (天) [7]: " interval_days
-        interval_days=${interval_days:-7}
-        read -p "备份时间 [03:00]: " backup_time
-        backup_time=${backup_time:-03:00}
-    else
-        interval_days="7"
-        backup_time="03:00"
-    fi
-    echo ""
-    
-    # 生成配置文件
-    cat > "$CONFIG_FILE" << EOF
-#!/bin/bash
-# SnapSync v3.0 配置文件
-# 生成时间: $(date '+%F %T')
-
-# === Telegram 配置 ===
-TELEGRAM_ENABLED="${enable_tg}"
-TELEGRAM_BOT_TOKEN="${bot_token}"
-TELEGRAM_CHAT_ID="${chat_id}"
-
-# === 远程备份配置 ===
-REMOTE_ENABLED="${enable_remote}"
-REMOTE_HOST="${remote_host}"
-REMOTE_USER="${remote_user}"
-REMOTE_PORT="${remote_port}"
-REMOTE_PATH="${remote_path}"
-REMOTE_USE_PASSWORD="${use_password}"
-REMOTE_KEEP_DAYS="30"
-
-# === 本地备份配置 ===
-BACKUP_DIR="${backup_dir}"
-COMPRESSION_LEVEL="${compression_level}"
-PARALLEL_THREADS="auto"
-LOCAL_KEEP_COUNT="${local_keep}"
-
-# === 定时任务配置 ===
-AUTO_BACKUP_ENABLED="${enable_auto}"
-BACKUP_INTERVAL_DAYS="${interval_days}"
-BACKUP_TIME="${backup_time}"
-
-# === 高级配置 ===
-ENABLE_ACL="true"
-ENABLE_XATTR="true"
-ENABLE_VERIFICATION="true"
-DISK_THRESHOLD="90"
-MEMORY_THRESHOLD="85"
-
-# === 系统信息 ===
-HOSTNAME="$(hostname)"
-INSTALL_DATE="$(date '+%F %T')"
-EOF
-
-    chmod 600 "$CONFIG_FILE"
-    log "${GREEN}✓ 配置文件已生成: $CONFIG_FILE${NC}\n"
-}
-
-# ===== SSH 密钥设置 =====
-setup_ssh_key() {
-    local user="$1"
-    local host="$2"
-    local port="$3"
-    
-    local ssh_key="/root/.ssh/id_ed25519"
-    
-    if [[ ! -f "$ssh_key" ]]; then
-        log "${YELLOW}生成 SSH 密钥...${NC}"
-        mkdir -p /root/.ssh
-        chmod 700 /root/.ssh
-        ssh-keygen -t ed25519 -N "" -f "$ssh_key" -q
-        log "${GREEN}✓ SSH 密钥已生成${NC}"
-    fi
-    
-    echo ""
-    log "${CYAN}请将以下公钥添加到远程服务器:${NC}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    cat "${ssh_key}.pub"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "${YELLOW}添加方法:${NC}"
-    echo "  ssh $user@$host -p $port"
-    echo "  echo '$(cat ${ssh_key}.pub)' >> ~/.ssh/authorized_keys"
-    echo ""
-    
-    read -p "已添加公钥? [Y/n]: " key_added
-    if [[ ! "$key_added" =~ ^[Nn]$ ]]; then
-        if ssh -i "$ssh_key" -p "$port" -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-            "$user@$host" "echo 'SSH 测试成功'" &>/dev/null; then
-            log "${GREEN}✓ SSH 连接测试成功${NC}"
-        else
-            log "${YELLOW}⚠ SSH 连接测试失败，请检查配置${NC}"
-        fi
-    fi
-}
-
-# ===== 安装功能模块 =====
-install_modules() {
-    log "${YELLOW}安装功能模块...${NC}"
-    
-    # 这里会从当前脚本目录或 GitHub 复制模块文件
-    # 为了演示，我们创建占位符
-    
-    local modules=("backup.sh" "restore.sh" "config.sh" "telegram.sh" "utils.sh")
-    
-    for module in "${modules[@]}"; do
-        if [[ -f "$MODULE_DIR/$module" ]]; then
-            log "${GREEN}  ✓ $module 已存在${NC}"
-        else
-            log "${YELLOW}  创建 $module 占位符${NC}"
-            touch "$MODULE_DIR/$module"
-            chmod +x "$MODULE_DIR/$module"
-        fi
-    done
-    
-    log "${GREEN}✓ 模块安装完成${NC}\n"
-}
-
-# ===== 设置 Systemd 服务 =====
-setup_systemd_services() {
-    log "${YELLOW}设置系统服务...${NC}"
-    
-    # 备份服务
-    cat > /etc/systemd/system/snapsync-backup.service << 'EOF'
-[Unit]
-Description=SnapSync Backup Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/opt/snapsync/modules/backup.sh
-User=root
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # 备份定时器
-    cat > /etc/systemd/system/snapsync-backup.timer << EOF
-[Unit]
-Description=SnapSync Backup Timer
-Requires=snapsync-backup.service
-
-[Timer]
-OnCalendar=*-*-* $(grep BACKUP_TIME "$CONFIG_FILE" | cut -d'"' -f2):00
-Persistent=true
-RandomizedDelaySec=30min
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    # Telegram Bot 服务
-    cat > /etc/systemd/system/snapsync-bot.service << 'EOF'
-[Unit]
-Description=SnapSync Telegram Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/opt/snapsync/bot/telegram_bot.sh
-Restart=always
-RestartSec=10
-User=root
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # 重新加载 systemd
-    systemctl daemon-reload
-    
-    # 启用服务
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-        if [[ "$AUTO_BACKUP_ENABLED" == "Y" ]] || [[ "$AUTO_BACKUP_ENABLED" == "true" ]]; then
-            systemctl enable snapsync-backup.timer &>/dev/null
-            systemctl start snapsync-backup.timer &>/dev/null
-            log "${GREEN}  ✓ 自动备份已启用${NC}"
-        fi
-        
-        if [[ "$TELEGRAM_ENABLED" == "Y" ]] || [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-            systemctl enable snapsync-bot.service &>/dev/null
-            systemctl start snapsync-bot.service &>/dev/null
-            log "${GREEN}  ✓ Telegram Bot 已启动${NC}"
-        fi
-    fi
-    
-    log "${GREEN}✓ 系统服务设置完成${NC}\n"
 }
 
 # ===== 主菜单 =====
@@ -450,30 +76,29 @@ show_main_menu() {
     echo -e "  ${GREEN}6)${NC} 🗑️  清理旧快照"
     echo -e "  ${GREEN}7)${NC} 📋 查看日志"
     echo -e "  ${GREEN}8)${NC} ℹ️  系统信息"
-    echo -e "  ${GREEN}9)${NC} ❓ 帮助文档"
+    echo -e "  ${GREEN}9)${NC} 🧹 完全卸载"
     echo -e "  ${RED}0)${NC} 🚪 退出"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
 
-# ===== 创建快照 =====
+# ===== 1. 创建快照 =====
 create_snapshot() {
     show_header
     log "${CYAN}📸 创建系统快照${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     
-    # 检查配置
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        log "${RED}错误: 配置文件不存在，请先运行初始化${NC}"
-        read -p "按 Enter 继续..."
+        log "${RED}错误: 配置文件不存在${NC}"
+        pause
         return
     fi
     
     source "$CONFIG_FILE"
     
-    # 询问是否上传
+    # 询问上传
     local upload_remote="n"
-    if [[ "$REMOTE_ENABLED" == "Y" ]] || [[ "$REMOTE_ENABLED" == "true" ]]; then
+    if [[ "${REMOTE_ENABLED}" =~ ^[Yy]|true$ ]]; then
         read -p "是否上传到远程服务器? [Y/n]: " upload_remote
         upload_remote=${upload_remote:-Y}
     fi
@@ -485,11 +110,10 @@ create_snapshot() {
         log "${RED}错误: 备份模块不存在${NC}"
     fi
     
-    echo ""
-    read -p "按 Enter 返回主菜单..."
+    pause
 }
 
-# ===== 恢复快照 =====
+# ===== 2. 恢复快照 =====
 restore_snapshot() {
     show_header
     log "${CYAN}🔄 恢复系统快照${NC}"
@@ -499,17 +123,15 @@ restore_snapshot() {
         bash "$MODULE_DIR/restore.sh"
     else
         log "${RED}错误: 恢复模块不存在${NC}"
+        pause
     fi
-    
-    echo ""
-    read -p "按 Enter 返回主菜单..."
 }
 
-# ===== 配置管理 =====
+# ===== 3. 配置管理 =====
 manage_config() {
     while true; do
         show_header
-        log "${CYAN}⚙️ 配置管理${NC}"
+        log "${CYAN}⚙️  配置管理${NC}"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
         
         echo -e "  ${GREEN}1)${NC} 修改远程服务器配置"
@@ -517,11 +139,13 @@ manage_config() {
         echo -e "  ${GREEN}3)${NC} 修改保留策略"
         echo -e "  ${GREEN}4)${NC} 修改定时任务"
         echo -e "  ${GREEN}5)${NC} 查看当前配置"
-        echo -e "  ${GREEN}6)${NC} 重新运行配置向导"
+        echo -e "  ${GREEN}6)${NC} 编辑配置文件"
+        echo -e "  ${GREEN}7)${NC} 重启服务"
+        echo -e "  ${GREEN}8)${NC} 测试 Telegram 连接"
         echo -e "  ${RED}0)${NC} 返回主菜单"
         echo ""
         
-        read -p "请选择 [0-6]: " choice
+        read -p "请选择 [0-8]: " choice
         
         case "$choice" in
             1) edit_remote_config ;;
@@ -529,22 +153,304 @@ manage_config() {
             3) edit_retention_config ;;
             4) edit_schedule_config ;;
             5) view_current_config ;;
-            6) run_config_wizard ;;
+            6) edit_config_file ;;
+            7) restart_services ;;
+            8) test_telegram_connection ;;
             0) break ;;
-            *) log "${RED}无效选择${NC}" ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
         esac
     done
 }
 
-# ===== 查看快照列表 =====
+# 3.1 修改远程配置
+edit_remote_config() {
+    show_header
+    log "${CYAN}修改远程服务器配置${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    source "$CONFIG_FILE"
+    
+    echo "当前配置:"
+    echo "  启用: ${REMOTE_ENABLED}"
+    echo "  服务器: ${REMOTE_HOST:-未设置}"
+    echo "  用户: ${REMOTE_USER:-root}"
+    echo "  端口: ${REMOTE_PORT:-22}"
+    echo "  路径: ${REMOTE_PATH:-未设置}"
+    echo ""
+    
+    read -p "启用远程备份? [Y/n]: " enable
+    enable=${enable:-Y}
+    
+    local host="$REMOTE_HOST"
+    local user="${REMOTE_USER:-root}"
+    local port="${REMOTE_PORT:-22}"
+    local path="$REMOTE_PATH"
+    
+    if [[ "$enable" =~ ^[Yy]$ ]]; then
+        read -p "服务器地址 [${REMOTE_HOST}]: " host
+        host=${host:-$REMOTE_HOST}
+        read -p "用户名 [${REMOTE_USER:-root}]: " user
+        user=${user:-${REMOTE_USER:-root}}
+        read -p "端口 [${REMOTE_PORT:-22}]: " port
+        port=${port:-${REMOTE_PORT:-22}}
+        read -p "路径 [${REMOTE_PATH}]: " path
+        path=${path:-$REMOTE_PATH}
+    fi
+    
+    # 更新配置
+    sed -i "s/^REMOTE_ENABLED=.*/REMOTE_ENABLED=\"$enable\"/" "$CONFIG_FILE"
+    sed -i "s|^REMOTE_HOST=.*|REMOTE_HOST=\"$host\"|" "$CONFIG_FILE"
+    sed -i "s/^REMOTE_USER=.*/REMOTE_USER=\"$user\"/" "$CONFIG_FILE"
+    sed -i "s/^REMOTE_PORT=.*/REMOTE_PORT=\"$port\"/" "$CONFIG_FILE"
+    sed -i "s|^REMOTE_PATH=.*|REMOTE_PATH=\"$path\"|" "$CONFIG_FILE"
+    
+    log "${GREEN}✓ 远程配置已更新${NC}"
+    pause
+}
+
+# 3.2 修改Telegram配置
+edit_telegram_config() {
+    show_header
+    log "${CYAN}修改 Telegram 配置${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    source "$CONFIG_FILE"
+    
+    echo "当前配置:"
+    echo "  启用: ${TELEGRAM_ENABLED}"
+    echo "  Bot Token: ${TELEGRAM_BOT_TOKEN:0:20}..."
+    echo "  Chat ID: ${TELEGRAM_CHAT_ID}"
+    echo ""
+    
+    read -p "启用 Telegram 通知? [Y/n]: " enable
+    enable=${enable:-Y}
+    
+    local token="$TELEGRAM_BOT_TOKEN"
+    local chatid="$TELEGRAM_CHAT_ID"
+    
+    if [[ "$enable" =~ ^[Yy]$ ]]; then
+        read -p "Bot Token [保持不变]: " token
+        token=${token:-$TELEGRAM_BOT_TOKEN}
+        read -p "Chat ID [保持不变]: " chatid
+        chatid=${chatid:-$TELEGRAM_CHAT_ID}
+    fi
+    
+    # 更新配置
+    sed -i "s/^TELEGRAM_ENABLED=.*/TELEGRAM_ENABLED=\"$enable\"/" "$CONFIG_FILE"
+    sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=\"$token\"|" "$CONFIG_FILE"
+    sed -i "s/^TELEGRAM_CHAT_ID=.*/TELEGRAM_CHAT_ID=\"$chatid\"/" "$CONFIG_FILE"
+    
+    log "${GREEN}✓ Telegram 配置已更新${NC}"
+    
+    # 询问是否测试
+    echo ""
+    read -p "是否测试 Telegram 连接? [Y/n]: " test
+    if [[ ! "$test" =~ ^[Nn]$ ]]; then
+        test_telegram_connection
+    fi
+    
+    pause
+}
+
+# 3.3 修改保留策略
+edit_retention_config() {
+    show_header
+    log "${CYAN}修改保留策略${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    source "$CONFIG_FILE"
+    
+    echo "当前配置:"
+    echo "  本地保留: ${LOCAL_KEEP_COUNT} 个"
+    echo "  远程保留: ${REMOTE_KEEP_DAYS} 天"
+    echo ""
+    
+    read -p "本地保留数量 [${LOCAL_KEEP_COUNT}]: " local_keep
+    local_keep=${local_keep:-$LOCAL_KEEP_COUNT}
+    
+    read -p "远程保留天数 [${REMOTE_KEEP_DAYS}]: " remote_keep
+    remote_keep=${remote_keep:-$REMOTE_KEEP_DAYS}
+    
+    sed -i "s/^LOCAL_KEEP_COUNT=.*/LOCAL_KEEP_COUNT=\"$local_keep\"/" "$CONFIG_FILE"
+    sed -i "s/^REMOTE_KEEP_DAYS=.*/REMOTE_KEEP_DAYS=\"$remote_keep\"/" "$CONFIG_FILE"
+    
+    log "${GREEN}✓ 保留策略已更新${NC}"
+    pause
+}
+
+# 3.4 修改定时任务
+edit_schedule_config() {
+    show_header
+    log "${CYAN}修改定时任务${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    source "$CONFIG_FILE"
+    
+    echo "当前配置:"
+    echo "  自动备份: ${AUTO_BACKUP_ENABLED}"
+    echo "  备份间隔: ${BACKUP_INTERVAL_DAYS} 天"
+    echo "  备份时间: ${BACKUP_TIME}"
+    echo ""
+    
+    read -p "启用自动备份? [Y/n]: " enable
+    enable=${enable:-Y}
+    
+    local interval="$BACKUP_INTERVAL_DAYS"
+    local time="$BACKUP_TIME"
+    
+    if [[ "$enable" =~ ^[Yy]$ ]]; then
+        read -p "备份间隔(天) [${BACKUP_INTERVAL_DAYS}]: " interval
+        interval=${interval:-$BACKUP_INTERVAL_DAYS}
+        read -p "备份时间(HH:MM) [${BACKUP_TIME}]: " time
+        time=${time:-$BACKUP_TIME}
+    fi
+    
+    sed -i "s/^AUTO_BACKUP_ENABLED=.*/AUTO_BACKUP_ENABLED=\"$enable\"/" "$CONFIG_FILE"
+    sed -i "s/^BACKUP_INTERVAL_DAYS=.*/BACKUP_INTERVAL_DAYS=\"$interval\"/" "$CONFIG_FILE"
+    sed -i "s/^BACKUP_TIME=.*/BACKUP_TIME=\"$time\"/" "$CONFIG_FILE"
+    
+    # 更新timer
+    if [[ -f /etc/systemd/system/snapsync-backup.timer ]]; then
+        cat > /etc/systemd/system/snapsync-backup.timer << EOF
+[Unit]
+Description=SnapSync Backup Timer
+
+[Timer]
+OnCalendar=*-*-* ${time}:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload
+        systemctl restart snapsync-backup.timer
+    fi
+    
+    log "${GREEN}✓ 定时任务已更新${NC}"
+    pause
+}
+
+# 3.5 查看配置
+view_current_config() {
+    show_header
+    log "${CYAN}当前配置${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cat "$CONFIG_FILE"
+    else
+        log "${RED}配置文件不存在${NC}"
+    fi
+    
+    pause
+}
+
+# 3.6 编辑配置文件
+edit_config_file() {
+    if command -v nano &>/dev/null; then
+        nano "$CONFIG_FILE"
+    elif command -v vi &>/dev/null; then
+        vi "$CONFIG_FILE"
+    else
+        log "${RED}未找到编辑器${NC}"
+        pause
+    fi
+}
+
+# 3.7 重启服务
+restart_services() {
+    show_header
+    log "${CYAN}重启服务${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    log "重新加载配置..."
+    systemctl daemon-reload
+    
+    log "重启备份定时器..."
+    systemctl restart snapsync-backup.timer 2>/dev/null && log "${GREEN}✓ 备份定时器${NC}" || log "${YELLOW}⚠ 备份定时器未运行${NC}"
+    
+    log "重启 Telegram Bot..."
+    systemctl restart snapsync-bot.service 2>/dev/null && log "${GREEN}✓ Telegram Bot${NC}" || log "${YELLOW}⚠ Bot未运行${NC}"
+    
+    log "${GREEN}服务重启完成${NC}"
+    pause
+}
+
+# 3.8 测试Telegram连接
+test_telegram_connection() {
+    show_header
+    log "${CYAN}测试 Telegram 连接${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    source "$CONFIG_FILE"
+    
+    if [[ "${TELEGRAM_ENABLED}" != "Y" && "${TELEGRAM_ENABLED}" != "true" ]]; then
+        log "${YELLOW}Telegram 未启用${NC}"
+        pause
+        return
+    fi
+    
+    if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+        log "${RED}Telegram 配置不完整${NC}"
+        echo "  Bot Token: ${TELEGRAM_BOT_TOKEN:0:20}..."
+        echo "  Chat ID: ${TELEGRAM_CHAT_ID}"
+        pause
+        return
+    fi
+    
+    log "测试 Bot API..."
+    local response=$(curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>&1)
+    
+    if echo "$response" | grep -q '"ok":true'; then
+        local bot_name=$(echo "$response" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+        log "${GREEN}✓ Bot 连接成功: @${bot_name}${NC}"
+        
+        log ""
+        log "发送测试消息..."
+        local test_msg="🔍 <b>连接测试</b>
+
+✅ Telegram 通知功能正常
+🖥️ 主机: $(hostname)
+⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+备份任务将发送通知到此会话"
+        
+        local send_response=$(curl -sS -m 10 -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${test_msg}" \
+            -d "parse_mode=HTML" 2>&1)
+        
+        if echo "$send_response" | grep -q '"ok":true'; then
+            log "${GREEN}✓ 测试消息发送成功！${NC}"
+            log ""
+            log "请检查 Telegram 是否收到消息"
+        else
+            log "${RED}✗ 测试消息发送失败${NC}"
+            log "响应: $send_response"
+        fi
+    else
+        log "${RED}✗ Bot API 测试失败${NC}"
+        log "响应: $response"
+        echo ""
+        echo "可能的原因："
+        echo "  1. Bot Token 错误"
+        echo "  2. 网络连接问题"
+        echo "  3. Bot 被删除"
+    fi
+    
+    pause
+}
+
+# ===== 4. 查看快照列表 =====
 list_snapshots() {
     show_header
     log "${CYAN}📊 快照列表${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        log "${RED}错误: 配置文件不存在${NC}"
-        read -p "按 Enter 继续..."
+        log "${RED}配置文件不存在${NC}"
+        pause
         return
     fi
     
@@ -553,14 +459,14 @@ list_snapshots() {
     
     if [[ ! -d "$snapshot_dir" ]]; then
         log "${YELLOW}快照目录不存在${NC}"
-        read -p "按 Enter 继续..."
+        pause
         return
     fi
     
     local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
     
     if [[ ${#snapshots[@]} -eq 0 ]]; then
-        log "${YELLOW}未找到快照文件${NC}"
+        log "${YELLOW}未找到快照${NC}"
     else
         log "${GREEN}找到 ${#snapshots[@]} 个快照:${NC}\n"
         
@@ -572,95 +478,357 @@ list_snapshots() {
             
             echo -e "  $((i+1)). ${GREEN}$name${NC}"
             echo -e "     大小: $size | 时间: $date"
-            
-            # 显示校验和状态
-            if [[ -f "${file}.sha256" ]]; then
-                echo -e "     状态: ${GREEN}✓ 已验证${NC}"
-            fi
+            [[ -f "${file}.sha256" ]] && echo -e "     状态: ${GREEN}✓ 已验证${NC}"
             echo ""
         done
         
-        # 显示总大小
         local total_size=$(du -sh "$snapshot_dir" 2>/dev/null | cut -f1)
         echo -e "${CYAN}总大小: $total_size${NC}"
     fi
     
-    echo ""
-    read -p "按 Enter 返回主菜单..."
+    pause
 }
 
-# ===== 查看配置 =====
-view_current_config() {
+# ===== 5. Telegram Bot 管理 =====
+manage_telegram_bot() {
+    while true; do
+        show_header
+        log "${CYAN}🤖 Telegram Bot 管理${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        
+        # 检查服务状态
+        local bot_status="未运行"
+        local bot_color="$RED"
+        if systemctl is-active snapsync-bot.service &>/dev/null; then
+            bot_status="运行中"
+            bot_color="$GREEN"
+        fi
+        
+        echo -e "  Bot 状态: ${bot_color}${bot_status}${NC}"
+        echo ""
+        
+        echo -e "  ${GREEN}1)${NC} 启动 Bot"
+        echo -e "  ${GREEN}2)${NC} 停止 Bot"
+        echo -e "  ${GREEN}3)${NC} 重启 Bot"
+        echo -e "  ${GREEN}4)${NC} 查看 Bot 日志"
+        echo -e "  ${GREEN}5)${NC} Bot 配置"
+        echo -e "  ${GREEN}6)${NC} 测试 Bot 连接"
+        echo -e "  ${RED}0)${NC} 返回"
+        echo ""
+        
+        read -p "请选择 [0-6]: " choice
+        
+        case "$choice" in
+            1)
+                systemctl start snapsync-bot.service
+                log "${GREEN}Bot 已启动${NC}"
+                sleep 2
+                ;;
+            2)
+                systemctl stop snapsync-bot.service
+                log "${YELLOW}Bot 已停止${NC}"
+                sleep 2
+                ;;
+            3)
+                systemctl restart snapsync-bot.service
+                log "${GREEN}Bot 已重启${NC}"
+                sleep 2
+                ;;
+            4)
+                show_header
+                echo "Bot 日志 (最近50行):"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                tail -50 "$LOG_DIR/bot.log" 2>/dev/null || echo "无日志"
+                pause
+                ;;
+            5)
+                edit_telegram_config
+                ;;
+            6)
+                test_telegram_connection
+                ;;
+            0) break ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ===== 6. 清理快照 =====
+clean_snapshots() {
     show_header
-    log "${CYAN}当前配置${NC}"
+    log "${CYAN}🗑️  清理旧快照${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log "${RED}配置文件不存在${NC}"
+        pause
+        return
+    fi
+    
+    source "$CONFIG_FILE"
+    local snapshot_dir="${BACKUP_DIR}/system_snapshots"
+    
+    local snapshots=($(find "$snapshot_dir" -name "*.tar*" -type f 2>/dev/null | sort -r))
+    local total=${#snapshots[@]}
+    local keep=${LOCAL_KEEP_COUNT:-5}
+    
+    echo -e "当前快照数: $total"
+    echo -e "保留数量: $keep"
+    echo ""
+    
+    if (( total <= keep )); then
+        log "${GREEN}无需清理${NC}"
+    else
+        local to_remove=$((total - keep))
+        echo -e "${YELLOW}将删除 $to_remove 个旧快照${NC}"
+        echo ""
+        
+        for ((i=keep; i<total; i++)); do
+            echo -e "  - $(basename "${snapshots[$i]}")"
+        done
+        
+        echo ""
+        read -p "确认删除? [y/N]: " confirm
+        
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            for ((i=keep; i<total; i++)); do
+                rm -f "${snapshots[$i]}" "${snapshots[$i]}.sha256"
+                log "${GREEN}✓ 已删除: $(basename "${snapshots[$i]}")${NC}"
+            done
+            log "${GREEN}清理完成${NC}"
+        else
+            log "${YELLOW}已取消${NC}"
+        fi
+    fi
+    
+    pause
+}
+
+# ===== 7. 查看日志 =====
+view_logs() {
+    while true; do
+        show_header
+        log "${CYAN}📋 日志查看${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        
+        echo -e "  ${GREEN}1)${NC} 备份日志"
+        echo -e "  ${GREEN}2)${NC} 恢复日志"
+        echo -e "  ${GREEN}3)${NC} Bot日志"
+        echo -e "  ${GREEN}4)${NC} 主日志"
+        echo -e "  ${GREEN}5)${NC} 实时监控备份日志"
+        echo -e "  ${RED}0)${NC} 返回"
+        echo ""
+        
+        read -p "选择 [0-5]: " log_choice
+        
+        case "$log_choice" in
+            1) view_log_file "$LOG_DIR/backup.log" "备份日志" ;;
+            2) view_log_file "$LOG_DIR/restore.log" "恢复日志" ;;
+            3) view_log_file "$LOG_DIR/bot.log" "Bot日志" ;;
+            4) view_log_file "$LOG_DIR/main.log" "主日志" ;;
+            5)
+                show_header
+                echo "实时监控备份日志 (Ctrl+C 退出):"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                tail -f "$LOG_DIR/backup.log" 2>/dev/null || echo "无日志"
+                ;;
+            0) break ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+view_log_file() {
+    local file="$1"
+    local title="$2"
+    
+    show_header
+    echo -e "${title} (最近 50 行):"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ -f "$file" ]]; then
+        tail -50 "$file"
+    else
+        echo "日志文件不存在"
+    fi
+    
+    pause
+}
+
+# ===== 8. 系统信息 =====
+show_system_info() {
+    show_header
+    log "${CYAN}ℹ️  系统信息${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    echo -e "${YELLOW}系统:${NC}"
+    echo -e "  主机: $(hostname)"
+    echo -e "  内核: $(uname -r)"
+    echo -e "  运行时间: $(uptime -p 2>/dev/null || echo "N/A")"
+    echo -e "  负载: $(uptime | awk -F'load average:' '{print $2}')"
+    echo ""
+    
+    echo -e "${YELLOW}SnapSync:${NC}"
+    echo -e "  版本: 3.0"
+    echo -e "  安装目录: $INSTALL_DIR"
+    echo -e "  配置文件: $CONFIG_FILE"
     
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
-        
-        echo -e "${YELLOW}Telegram 配置:${NC}"
-        echo -e "  启用: ${TELEGRAM_ENABLED}"
-        echo -e "  Bot Token: ${TELEGRAM_BOT_TOKEN:0:10}..."
-        echo -e "  Chat ID: ${TELEGRAM_CHAT_ID}"
-        echo ""
-        
-        echo -e "${YELLOW}远程备份配置:${NC}"
-        echo -e "  启用: ${REMOTE_ENABLED}"
-        echo -e "  服务器: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT}"
-        echo -e "  路径: ${REMOTE_PATH}"
-        echo ""
-        
-        echo -e "${YELLOW}本地备份配置:${NC}"
         echo -e "  备份目录: ${BACKUP_DIR}"
-        echo -e "  压缩级别: ${COMPRESSION_LEVEL}"
-        echo -e "  保留数量: ${LOCAL_KEEP_COUNT}"
-        echo ""
         
-        echo -e "${YELLOW}定时任务配置:${NC}"
-        echo -e "  启用: ${AUTO_BACKUP_ENABLED}"
-        echo -e "  间隔: ${BACKUP_INTERVAL_DAYS} 天"
-        echo -e "  时间: ${BACKUP_TIME}"
-        echo ""
+        local snap_count=$(find "${BACKUP_DIR}/system_snapshots" -name "*.tar*" 2>/dev/null | wc -l)
+        echo -e "  快照数量: ${snap_count}"
+    fi
+    echo ""
+    
+    echo -e "${YELLOW}服务状态:${NC}"
+    
+    if systemctl is-enabled snapsync-backup.timer &>/dev/null; then
+        echo -e "  自动备份: ${GREEN}✓ 已启用${NC}"
+        local next=$(systemctl list-timers snapsync-backup.timer 2>/dev/null | awk 'NR==2 {print $1" "$2}')
+        [[ -n "$next" ]] && echo -e "  下次运行: $next"
     else
-        log "${RED}配置文件不存在${NC}"
+        echo -e "  自动备份: ${YELLOW}○ 未启用${NC}"
     fi
     
-    read -p "按 Enter 继续..."
+    if systemctl is-active snapsync-bot.service &>/dev/null; then
+        echo -e "  Telegram Bot: ${GREEN}✓ 运行中${NC}"
+    else
+        echo -e "  Telegram Bot: ${YELLOW}○ 未运行${NC}"
+    fi
+    
+    pause
 }
 
-# ===== 主程序入口 =====
+# ===== 9. 完全卸载 =====
+uninstall_snapsync() {
+    show_header
+    log "${RED}🧹 完全卸载 SnapSync${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    echo -e "${YELLOW}警告: 此操作将删除以下内容:${NC}"
+    echo "  • 所有程序文件 ($INSTALL_DIR)"
+    echo "  • 配置文件 ($CONFIG_DIR)"
+    echo "  • 日志文件 ($LOG_DIR)"
+    echo "  • 系统服务"
+    echo "  • 命令快捷方式"
+    echo ""
+    echo -e "${RED}注意: 备份文件不会被删除${NC}"
+    echo ""
+    
+    read -p "确认卸载? 输入 'YES' 继续: " confirm
+    
+    if [[ "$confirm" != "YES" ]]; then
+        log "${YELLOW}已取消${NC}"
+        pause
+        return
+    fi
+    
+    log ""
+    log "${YELLOW}开始卸载...${NC}"
+    
+    # 停止服务
+    log "停止服务..."
+    systemctl stop snapsync-backup.timer 2>/dev/null || true
+    systemctl stop snapsync-backup.service 2>/dev/null || true
+    systemctl stop snapsync-bot.service 2>/dev/null || true
+    
+    # 禁用服务
+    log "禁用服务..."
+    systemctl disable snapsync-backup.timer 2>/dev/null || true
+    systemctl disable snapsync-bot.service 2>/dev/null || true
+    
+    # 删除服务文件
+    log "删除服务文件..."
+    rm -f /etc/systemd/system/snapsync-*.service
+    rm -f /etc/systemd/system/snapsync-*.timer
+    systemctl daemon-reload
+    
+    # 删除命令
+    log "删除命令..."
+    rm -f /usr/local/bin/snapsync
+    rm -f /usr/local/bin/snapsync-backup
+    rm -f /usr/local/bin/snapsync-restore
+    
+    # 删除程序文件
+    log "删除程序文件..."
+    rm -rf "$INSTALL_DIR"
+    
+    # 询问是否删除配置和日志
+    echo ""
+    read -p "是否删除配置文件? [y/N]: " del_config
+    if [[ "$del_config" =~ ^[Yy]$ ]]; then
+        rm -rf "$CONFIG_DIR"
+        log "✓ 配置文件已删除"
+    fi
+    
+    read -p "是否删除日志文件? [y/N]: " del_logs
+    if [[ "$del_logs" =~ ^[Yy]$ ]]; then
+        rm -rf "$LOG_DIR"
+        log "✓ 日志文件已删除"
+    fi
+    
+    # 询问是否删除备份
+    echo ""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+        local backup_count=$(find "${BACKUP_DIR}/system_snapshots" -name "*.tar*" 2>/dev/null | wc -l)
+        
+        if (( backup_count > 0 )); then
+            log "${YELLOW}警告: 发现 $backup_count 个备份文件${NC}"
+            read -p "是否删除所有备份? [y/N]: " del_backups
+            if [[ "$del_backups" =~ ^[Yy]$ ]]; then
+                rm -rf "${BACKUP_DIR}/system_snapshots"
+                rm -rf "${BACKUP_DIR}/metadata"
+                rm -rf "${BACKUP_DIR}/checksums"
+                log "✓ 备份文件已删除"
+            else
+                log "${GREEN}备份文件已保留在: ${BACKUP_DIR}${NC}"
+            fi
+        fi
+    fi
+    
+    log ""
+    log "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${GREEN}✓ SnapSync 卸载完成${NC}"
+    log "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log ""
+    log "感谢使用 SnapSync!"
+    log ""
+    
+    pause
+    exit 0
+}
+
+# ===== 主程序 =====
 main() {
-    # 检查是否首次运行
-    if [[ ! -f "$CONFIG_FILE" ]] || [[ ! -d "$INSTALL_DIR" ]]; then
-        initialize_installation
+    # 检查安装
+    if [[ ! -d "$INSTALL_DIR" ]] || [[ ! -f "$CONFIG_FILE" ]]; then
+        log "${RED}错误: SnapSync 未正确安装${NC}"
+        log "${YELLOW}请运行安装脚本: sudo bash install.sh${NC}"
+        exit 1
     fi
     
     # 主循环
     while true; do
         show_main_menu
-        read -p "请选择操作 [0-9]: " choice
+        read -p "请选择 [0-9]: " choice
         
         case "$choice" in
             1) create_snapshot ;;
             2) restore_snapshot ;;
             3) manage_config ;;
             4) list_snapshots ;;
-            5) log "${YELLOW}Telegram Bot 管理功能开发中...${NC}"; sleep 2 ;;
-            6) log "${YELLOW}清理功能开发中...${NC}"; sleep 2 ;;
-            7) log "${YELLOW}日志查看功能开发中...${NC}"; sleep 2 ;;
-            8) log "${YELLOW}系统信息功能开发中...${NC}"; sleep 2 ;;
-            9) log "${YELLOW}帮助文档功能开发中...${NC}"; sleep 2 ;;
-            0) 
-                log "${GREEN}感谢使用 SnapSync v3.0!${NC}"
-                exit 0
-                ;;
-            *)
-                log "${RED}无效选择，请重试${NC}"
-                sleep 1
-                ;;
+            5) manage_telegram_bot ;;
+            6) clean_snapshots ;;
+            7) view_logs ;;
+            8) show_system_info ;;
+            9) uninstall_snapsync ;;
+            0) log "${GREEN}感谢使用!${NC}"; exit 0 ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
         esac
     done
 }
 
-# 运行主程序
 main "$@"
