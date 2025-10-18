@@ -17,10 +17,55 @@ readonly YELLOW='\033[0;33m'
 readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
-# ===== 加载配置 =====
+# ===== 加载或创建配置 =====
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo -e "${RED}错误: 配置文件不存在${NC}"
-    exit 1
+    echo -e "${YELLOW}首次运行，创建配置文件...${NC}"
+    mkdir -p "$CONFIG_DIR"
+    
+    # 创建默认配置
+    cat > "$CONFIG_FILE" << 'EOFCONFIG'
+#!/bin/bash
+# SnapSync 配置文件（自动生成）
+
+# Telegram 配置（可选）
+TELEGRAM_ENABLED="false"
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# 远程备份（可选）
+REMOTE_ENABLED="false"
+REMOTE_HOST=""
+REMOTE_USER="root"
+REMOTE_PORT="22"
+REMOTE_PATH="/backups"
+REMOTE_KEEP_DAYS="30"
+
+# 本地备份
+BACKUP_DIR="/backups"
+LOCAL_KEEP_COUNT="5"
+
+# 定时任务
+AUTO_BACKUP_ENABLED="false"
+BACKUP_INTERVAL_DAYS="7"
+BACKUP_TIME="03:00"
+
+# 无损备份特性（自动启用）
+ENABLE_ACL="true"
+ENABLE_XATTR="true"
+ENABLE_SELINUX="true"
+ENABLE_VERIFICATION="true"
+
+# 性能优化（自动）
+PARALLEL_THREADS="auto"
+COMPRESSION_LEVEL="6"
+
+# 系统信息
+HOSTNAME="$(hostname)"
+EOFCONFIG
+    
+    chmod 600 "$CONFIG_FILE"
+    echo -e "${GREEN}✓ 配置文件已创建: $CONFIG_FILE${NC}"
+    echo -e "${YELLOW}提示: 可编辑此文件修改配置${NC}\n"
 fi
 
 source "$CONFIG_FILE"
