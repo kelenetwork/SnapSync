@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SnapSync v3.0 - 无损恢复模块（修复版）
-# 修复：快照列表显示问题 + 改进用户交互
+# 修复：find 命令兼容性 + 增强错误提示
 
 set -euo pipefail
 
@@ -83,7 +83,9 @@ load_config() {
 list_local_snapshots() {
     local snapshot_dir="${BACKUP_DIR}/system_snapshots"
     
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_info "扫描快照目录: $snapshot_dir"
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
     # 检查目录
     if [[ ! -d "$snapshot_dir" ]]; then
@@ -106,11 +108,24 @@ list_local_snapshots() {
         return 1
     fi
     
-    # 查找快照（使用正确的find语法）
+    # 查找快照（修复版：使用管道排序而不是 -print0 + sort -z）
+    log_info "正在查找快照文件..."
+    
     local snapshots=()
-    while IFS= read -r -d '' file; do
-        snapshots+=("$file")
-    done < <(find "$snapshot_dir" -maxdepth 1 -name "system_snapshot_*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    local temp_file="/tmp/snapsync_snapshots_$$"
+    
+    # 先找到所有文件并按时间排序
+    find "$snapshot_dir" -maxdepth 1 -name "system_snapshot_*.tar*" -type f -printf "%T@ %p\n" 2>/dev/null | \
+        sort -rn | cut -d' ' -f2- > "$temp_file"
+    
+    # 读取到数组
+    while IFS= read -r file; do
+        [[ -n "$file" ]] && snapshots+=("$file")
+    done < "$temp_file"
+    
+    rm -f "$temp_file"
+    
+    log_info "找到 ${#snapshots[@]} 个快照文件"
     
     # 检查结果
     if [[ ${#snapshots[@]} -eq 0 ]]; then
@@ -124,7 +139,7 @@ list_local_snapshots() {
         echo ""
         echo "目录内容："
         if ls -lh "$snapshot_dir" 2>/dev/null | grep -q '^-'; then
-            ls -lh "$snapshot_dir"
+            ls -lh "$snapshot_dir" | head -10
         else
             echo "  (目录为空或只有子目录)"
         fi
@@ -135,8 +150,6 @@ list_local_snapshots() {
         echo ""
         return 1
     fi
-    
-    log_info "找到 ${#snapshots[@]} 个快照"
     
     # 显示列表
     echo ""
