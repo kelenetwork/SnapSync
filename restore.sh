@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SnapSync v3.0 - 恢复模块（完整修复版）
-# 重点修复：远程快照下载和恢复逻辑
+# 关键修复：远程快照下载后的路径处理
 
 set -euo pipefail
 
@@ -207,7 +207,7 @@ list_remote_snapshots() {
     return 0
 }
 
-# ===== 下载远程快照（修复版）=====
+# ===== 下载远程快照（修复版 - 关键修复点）=====
 download_remote_snapshot() {
     local remote_file="$1"
     local local_dir="${BACKUP_DIR}/system_snapshots"
@@ -230,6 +230,7 @@ download_remote_snapshot() {
         read -p "是否覆盖? [y/N]: " overwrite >&2
         if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
             log_info "使用现有本地文件"
+            # 🔴 关键修复：只输出路径，不要空行
             echo "$local_file"
             return 0
         fi
@@ -304,7 +305,7 @@ download_remote_snapshot() {
 
 快照已下载到本地"
         
-        echo ""
+        # 🔴 关键修复：删除多余的 echo ""，只输出路径
         echo "$local_file"
         return 0
     else
@@ -497,10 +498,28 @@ perform_restore() {
     local snapshot_file="$1"
     local restore_mode="$2"
     
-    [[ ! -f "$snapshot_file" ]] && log_error "快照不存在" && return 1
+    # 🔴 关键修复：添加详细验证
+    echo "" >&2
+    log_info "验证快照文件..."
+    log_info "文件路径: $snapshot_file"
+    
+    if [[ ! -f "$snapshot_file" ]]; then
+        log_error "快照文件不存在: $snapshot_file"
+        echo -e "${RED}文件不存在！${NC}" >&2
+        return 1
+    fi
+    
+    if [[ ! -s "$snapshot_file" ]]; then
+        log_error "快照文件为空: $snapshot_file"
+        echo -e "${RED}文件为空！${NC}" >&2
+        return 1
+    fi
+    
+    local file_size=$(stat -c%s "$snapshot_file" 2>/dev/null || echo 0)
+    log_info "文件大小: $(format_bytes $file_size)"
     
     local snapshot_name=$(basename "$snapshot_file")
-    local size=$(format_bytes "$(stat -c%s "$snapshot_file" 2>/dev/null || echo 0)")
+    local size=$(format_bytes "$file_size")
     
     echo "" >&2
     log_info "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -662,11 +681,17 @@ main() {
             }
             
             # 下载快照
+            log_info "准备下载远程快照..."
             snapshot_file=$(download_remote_snapshot "$remote_file") || {
                 echo "" >&2
                 log_error "下载失败"
                 exit 1
             }
+            
+            # 🔴 关键修复：清理路径（去除空白字符和空行）
+            snapshot_file=$(echo "$snapshot_file" | xargs)
+            
+            log_info "下载的文件: $snapshot_file"
             ;;
         *)
             log_error "无效选择"
@@ -674,7 +699,18 @@ main() {
             ;;
     esac
     
-    [[ -z "$snapshot_file" || ! -f "$snapshot_file" ]] && log_error "无效快照" && exit 1
+    # 🔴 关键修复：再次验证路径
+    if [[ -z "$snapshot_file" ]]; then
+        log_error "快照文件路径为空"
+        exit 1
+    fi
+    
+    if [[ ! -f "$snapshot_file" ]]; then
+        log_error "快照文件不存在: $snapshot_file"
+        exit 1
+    fi
+    
+    log_info "确认快照文件: $snapshot_file"
     
     # 选择模式
     echo "" >&2
