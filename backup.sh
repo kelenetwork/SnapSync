@@ -1,10 +1,6 @@
 #!/bin/bash
 
 # SnapSync v3.0 - 备份模块（完整修复版）
-# 修复：
-# 1. log 函数输出到 stderr，避免污染 stdout
-# 2. SSH 连接强制使用密钥认证，禁用密码提示
-# 3. 快照路径捕获逻辑完善
 
 set -euo pipefail
 
@@ -23,9 +19,8 @@ NC='\033[0m'
 # ===== 初始化 =====
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# ===== 工具函数（修复：输出到 stderr）=====
+# ===== 工具函数 =====
 log_info() {
-    # 输出到 stderr 和日志文件，避免污染 stdout
     echo -e "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE" >&2
 }
 
@@ -43,7 +38,6 @@ send_telegram() {
     
     local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
     if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
-        log_info "[TG] Telegram未启用"
         return 0
     fi
     
@@ -55,7 +49,7 @@ send_telegram() {
     local hostname="${HOSTNAME:-$(hostname)}"
     local vps_tag="🖥️ <b>${hostname}</b>"
     local full_message="${vps_tag}
-
+━━━━━━━━━━━━━━━━━━━━━━━
 ${message}"
     
     log_info "[TG] 发送通知..."
@@ -314,7 +308,7 @@ create_snapshot() {
     return 0
 }
 
-# ===== 上传远程（修复：强制使用密钥认证）=====
+# ===== 上传远程 =====
 upload_to_remote() {
     local snapshot_file="$1"
     [[ ! -f "$snapshot_file" ]] && log_error "快照不存在: $snapshot_file" && return 1
@@ -349,7 +343,6 @@ sudo snapsync
         return 1
     fi
     
-    # 修复：强制使用密钥认证，禁用密码提示
     local ssh_opts=(
         "-o" "StrictHostKeyChecking=no"
         "-o" "UserKnownHostsFile=/dev/null"
@@ -481,7 +474,7 @@ clean_local_snapshots() {
     fi
 }
 
-# ===== 清理远程（修复：强制使用密钥认证）=====
+# ===== 清理远程 =====
 clean_remote_snapshots() {
     log_info "清理远程旧快照..."
     
