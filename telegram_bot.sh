@@ -1,394 +1,207 @@
 #!/bin/bash
 
-# SnapSync v3.0 - Telegram Bot（调试增强版）
-# 添加详细日志输出，方便排查问题
+# SnapSync v3.0 - Telegram Bot（修复版）
 
-set -euo pipefail
-
-# ===== 配置文件 =====
 CONFIG_FILE="/etc/snapsync/config.conf"
 LOG_FILE="/var/log/snapsync/bot.log"
 OFFSET_FILE="/var/run/snapsync_bot_offset"
 
-# ===== 检查配置 =====
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] 配置文件不存在: $CONFIG_FILE" >> "$LOG_FILE"
-    exit 1
-fi
-
+[[ ! -f "$CONFIG_FILE" ]] && echo "配置文件不存在" && exit 1
 source "$CONFIG_FILE" || exit 1
 
-# ===== 全局变量 =====
 API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
 HOST="${HOSTNAME:-$(hostname)}"
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$OFFSET_FILE")"
 
-# ===== 日志函数 =====
-log() {
-    echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
-}
+log() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"; }
 
-log_debug() {
-    echo "[$(date '+%H:%M:%S')] [DEBUG] $*" >> "$LOG_FILE"
-}
-
-# ===== API 调用函数 =====
-call_api() {
-    local endpoint="$1"
-    shift
-    local response=$(curl -sS -m 15 -X POST "${API}/${endpoint}" "$@" 2>&1)
-    local exit_code=$?
-    
-    if [[ $exit_code -ne 0 ]]; then
-        log_debug "API调用失败: $endpoint (退出码: $exit_code)"
-        echo '{"ok":false}'
-        return 1
-    fi
-    
-    echo "$response"
-}
-
-send_message() {
-    local chat_id="$1"
-    local text="$2"
-    local keyboard="${3:-}"
-    
-    log_debug "发送消息到 $chat_id: ${text:0:50}..."
-    
-    call_api sendMessage \
-        -d "chat_id=$chat_id" \
-        --data-urlencode "text=🖥️ <b>${HOST}</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-$text" \
-        -d "parse_mode=HTML" \
-        ${keyboard:+-d "reply_markup=$keyboard"}
-}
-
-edit_message() {
-    local chat_id="$1"
-    local message_id="$2"
-    local text="$3"
-    local keyboard="${4:-}"
-    
-    log_debug "编辑消息: $chat_id/$message_id"
-    
-    call_api editMessageText \
-        -d "chat_id=$chat_id" \
-        -d "message_id=$message_id" \
-        --data-urlencode "text=🖥️ <b>${HOST}</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━
-$text" \
-        -d "parse_mode=HTML" \
-        ${keyboard:+-d "reply_markup=$keyboard"}
-}
-
-answer_callback() {
-    local callback_id="$1"
-    local text="${2:-✓}"
-    call_api answerCallbackQuery -d "callback_query_id=$callback_id" -d "text=$text" >/dev/null
-}
-
-# ===== 工具函数 =====
 format_bytes() {
-    local bytes="$1"
-    if (( bytes >= 1073741824 )); then
-        echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1073741824}")GB"
-    elif (( bytes >= 1048576 )); then
-        echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1048576}")MB"
-    elif (( bytes >= 1024 )); then
-        echo "$(awk "BEGIN {printf \"%.2f\", $bytes/1024}")KB"
-    else
-        echo "${bytes}B"
-    fi
+    local b="$1"
+    if (( b >= 1073741824 )); then echo "$(awk "BEGIN {printf \"%.2f\", $b/1073741824}")GB"
+    elif (( b >= 1048576 )); then echo "$(awk "BEGIN {printf \"%.2f\", $b/1048576}")MB"
+    elif (( b >= 1024 )); then echo "$(awk "BEGIN {printf \"%.2f\", $b/1024}")KB"
+    else echo "${b}B"; fi
 }
 
-get_cpu_usage() {
-    top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "N/A"
+send_msg() {
+    local cid="$1" txt="$2" kb="${3:-}"
+    local result=$(curl -sS -X POST "${API}/sendMessage" -d "chat_id=$cid" \
+        --data-urlencode "text=🖥️ <b>${HOST}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+$txt" -d "parse_mode=HTML" ${kb:+-d "reply_markup=$kb"} 2>&1)
+    log "发送消息: ${txt:0:30}... -> ${result:0:50}"
 }
 
-get_mem_usage() {
-    free | awk '/Mem:/ {printf "%.1f", $3/$2*100}' || echo "N/A"
-}
-
-get_backup_dir_size() {
-    du -sh "${BACKUP_DIR}/system_snapshots" 2>/dev/null | awk '{print $1}' || echo "0B"
-}
-
-get_next_backup_time() {
-    systemctl list-timers snapsync-backup.timer 2>/dev/null | awk '/snapsync-backup.timer/ {print $1,$2,$3}' | head -1 || echo "未启用"
-}
-
-# ===== 菜单构建 =====
-menu_main() {
-    cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"📊 系统状态","callback_data":"status"}],
-[{"text":"📋 快照列表","callback_data":"list"}],
-[{"text":"🔄 创建快照","callback_data":"backup"},{"text":"♻️ 恢复指南","callback_data":"restore"}],
-[{"text":"🗑️ 删除快照","callback_data":"delete"}],
-[{"text":"⚙️ 配置管理","callback_data":"config"}],
-[{"text":"📝 查看日志","callback_data":"logs"},{"text":"🔌 测试连接","callback_data":"test"}]
-]}
-EOF
-}
-
-menu_back() {
-    echo '{"inline_keyboard":[[{"text":"🔙 返回主菜单","callback_data":"main"}]]}'
-}
-
-menu_config() {
-    cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"📦 快照保留策略","callback_data":"cfg_retention"}],
-[{"text":"⏰ 备份计划","callback_data":"cfg_schedule"}],
-[{"text":"🗜️ 压缩级别","callback_data":"cfg_compress"}],
-[{"text":"🌐 远程备份","callback_data":"cfg_remote"}],
-[{"text":"🔙 返回主菜单","callback_data":"main"}]
-]}
-EOF
-}
-
-menu_logs() {
-    cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"📘 备份日志","callback_data":"log_backup"}],
-[{"text":"📗 恢复日志","callback_data":"log_restore"}],
-[{"text":"📙 Bot日志","callback_data":"log_bot"}],
-[{"text":"🔙 返回主菜单","callback_data":"main"}]
-]}
-EOF
-}
-
-menu_test() {
-    cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"🌐 测试远程服务器","callback_data":"test_remote"}],
-[{"text":"📱 测试Telegram","callback_data":"test_tg"}],
-[{"text":"🔙 返回主菜单","callback_data":"main"}]
-]}
-EOF
-}
-
-menu_confirm_backup() {
-    local with_upload="$1"
-    if [[ "$with_upload" == "yes" ]]; then
-        cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"✅ 创建并上传","callback_data":"backup_exec_upload"}],
-[{"text":"💾 仅本地备份","callback_data":"backup_exec_local"}],
-[{"text":"❌ 取消","callback_data":"main"}]
-]}
-EOF
-    else
-        cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"✅ 确认创建","callback_data":"backup_exec_local"}],
-[{"text":"❌ 取消","callback_data":"main"}]
-]}
-EOF
-    fi
-}
-
-menu_compress_level() {
-    cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"1️⃣ 最快","callback_data":"cmp_1"},{"text":"3️⃣ 快","callback_data":"cmp_3"},{"text":"6️⃣ 平衡","callback_data":"cmp_6"}],
-[{"text":"9️⃣ 最高压缩","callback_data":"cmp_9"}],
-[{"text":"🔙 返回配置","callback_data":"config"}]
-]}
-EOF
-}
-
-menu_remote_toggle() {
-    cat << 'EOF'
-{"inline_keyboard":[
-[{"text":"✅ 启用","callback_data":"rmt_on"}],
-[{"text":"❌ 禁用","callback_data":"rmt_off"}],
-[{"text":"🔙 返回配置","callback_data":"config"}]
-]}
-EOF
-}
-
-# ===== 命令处理 =====
-cmd_start() {
-    local chat_id="$1"
-    log "[CMD] /start from $chat_id"
-    send_message "$chat_id" "🎯 <b>SnapSync 控制中心</b>
-
-📦 版本: v3.0
-🖥️ 主机: ${HOST}
-
-<i>选择功能开始操作</i>" "$(menu_main)"
-}
-
-# ===== 回调处理 =====
-cb_main() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
+edit_msg() {
+    local cid="$1" mid="$2" txt="$3" kb="${4:-}"
+    local result=$(curl -sS -X POST "${API}/editMessageText" \
+        -d "chat_id=$cid" \
+        -d "message_id=$mid" \
+        --data-urlencode "text=🖥️ <b>${HOST}</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+$txt" \
+        -d "parse_mode=HTML" \
+        ${kb:+-d "reply_markup=$kb"} 2>&1)
     
-    answer_callback "$callback_id"
-    edit_message "$chat_id" "$message_id" "🎯 <b>SnapSync 控制中心</b>
+    if echo "$result" | grep -q '"ok":false'; then
+        log "编辑失败: ${result:0:100}"
+    else
+        log "编辑消息: $cid/$mid -> ${txt:0:30}..."
+    fi
+}
+
+answer_cb() {
+    curl -sS -X POST "${API}/answerCallbackQuery" \
+        -d "callback_query_id=$1" -d "text=${2:-✓}" &>/dev/null
+}
+
+# 菜单定义
+menu_main='{"inline_keyboard":[[{"text":"📊 系统状态","callback_data":"status"}],[{"text":"📋 快照列表","callback_data":"list"}],[{"text":"🔄 创建快照","callback_data":"backup"},{"text":"♻️ 恢复指南","callback_data":"restore"}],[{"text":"🗑️ 删除快照","callback_data":"delete"}],[{"text":"⚙️ 配置管理","callback_data":"config"}],[{"text":"📝 查看日志","callback_data":"logs"},{"text":"🔌 测试连接","callback_data":"test"}]]}'
+
+menu_back='{"inline_keyboard":[[{"text":"🔙 返回主菜单","callback_data":"main"}]]}'
+
+menu_config='{"inline_keyboard":[[{"text":"📦 快照保留策略","callback_data":"cfg_retention"}],[{"text":"⏰ 备份计划","callback_data":"cfg_schedule"}],[{"text":"🗜️ 压缩级别","callback_data":"cfg_compress"}],[{"text":"🌐 远程备份","callback_data":"cfg_remote"}],[{"text":"🔙 返回主菜单","callback_data":"main"}]]}'
+
+menu_logs='{"inline_keyboard":[[{"text":"📘 备份日志","callback_data":"log_backup"}],[{"text":"📗 恢复日志","callback_data":"log_restore"}],[{"text":"📙 Bot日志","callback_data":"log_bot"}],[{"text":"🔙 返回主菜单","callback_data":"main"}]]}'
+
+menu_test='{"inline_keyboard":[[{"text":"🌐 测试远程服务器","callback_data":"test_remote"}],[{"text":"📱 测试Telegram","callback_data":"test_tg"}],[{"text":"🔙 返回主菜单","callback_data":"main"}]]}'
+
+menu_compress='{"inline_keyboard":[[{"text":"1️⃣ 最快","callback_data":"cmp_1"},{"text":"3️⃣ 快","callback_data":"cmp_3"},{"text":"6️⃣ 平衡","callback_data":"cmp_6"}],[{"text":"9️⃣ 最高压缩","callback_data":"cmp_9"}],[{"text":"🔙 返回配置","callback_data":"config"}]]}'
+
+menu_remote='{"inline_keyboard":[[{"text":"✅ 启用","callback_data":"rmt_on"}],[{"text":"❌ 禁用","callback_data":"rmt_off"}],[{"text":"🔙 返回配置","callback_data":"config"}]]}'
+
+# 命令处理
+cmd_start() {
+    send_msg "$1" "🎯 <b>SnapSync 控制中心</b>
 
 📦 版本: v3.0
 🖥️ 主机: ${HOST}
 
-<i>选择功能开始操作</i>" "$(menu_main)"
+<i>选择功能开始操作</i>" "$menu_main"
+}
+
+# 回调处理函数
+cb_main() {
+    answer_cb "$3"
+    edit_msg "$1" "$2" "🎯 <b>SnapSync 控制中心</b>
+
+📦 版本: v3.0
+🖥️ 主机: ${HOST}
+
+<i>选择功能开始操作</i>" "$menu_main"
 }
 
 cb_status() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
+    answer_cb "$3"
+    local up=$(uptime -p 2>/dev/null || echo "未知")
+    local load=$(uptime | awk -F'load average:' '{print $2}' | xargs || echo "N/A")
+    local cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "N/A")
+    local mem=$(free | awk '/Mem:/ {printf "%.1f", $3/$2*100}' || echo "N/A")
+    local disk=$(df -h "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $5}' || echo "N/A")
+    local free=$(df -h "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "N/A")
+    local cnt=$(find "${BACKUP_DIR}/system_snapshots" -name "*.tar*" -type f 2>/dev/null | grep -cv sha256 || echo 0)
+    local size=$(du -sh "${BACKUP_DIR}/system_snapshots" 2>/dev/null | awk '{print $1}' || echo "0B")
     
-    answer_callback "$callback_id"
-    
-    # 收集系统信息
-    local uptime=$(uptime -p 2>/dev/null || echo "未知")
-    local load=$(uptime | awk -F'load average:' '{print $2}' | xargs)
-    local cpu=$(get_cpu_usage)
-    local mem=$(get_mem_usage)
-    local disk=$(df -h "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $5}')
-    local disk_free=$(df -h "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
-    local snapshot_count=$(find "${BACKUP_DIR}/system_snapshots" -name "*.tar*" -type f 2>/dev/null | grep -cv sha256 || echo 0)
-    local backup_size=$(get_backup_dir_size)
-    local next_backup=$(get_next_backup_time)
-    
-    edit_message "$chat_id" "$message_id" "📊 <b>系统状态</b>
+    edit_msg "$1" "$2" "📊 <b>系统状态</b>
 
 <b>⚡ 系统运行</b>
-🕐 运行时间: ${uptime}
+🕐 运行时间: ${up}
 📈 负载: ${load}
 🔥 CPU: ${cpu}%
 💾 内存: ${mem}%
 
 <b>💿 磁盘状态</b>
 📊 使用率: ${disk}
-💽 可用: ${disk_free}
+💽 可用: ${free}
 
 <b>📦 备份状态</b>
-📸 快照数量: ${snapshot_count} 个
-📁 占用空间: ${backup_size}
-⏰ 下次备份: ${next_backup}
+📸 快照数量: ${cnt} 个
+📁 占用空间: ${size}
 
-<i>更新时间: $(date '+%H:%M:%S')</i>" "$(menu_back)"
+<i>更新时间: $(date '+%H:%M:%S')</i>" "$menu_back"
 }
 
 cb_list() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
-    local snapshot_dir="${BACKUP_DIR}/system_snapshots"
-    
-    if [[ ! -d "$snapshot_dir" ]]; then
-        edit_message "$chat_id" "$message_id" "📋 <b>快照列表</b>
+    answer_cb "$3"
+    local dir="${BACKUP_DIR}/system_snapshots"
+    [[ ! -d "$dir" ]] && edit_msg "$1" "$2" "📋 <b>快照列表</b>
 
-❌ 快照目录不存在
-📂 目录: ${snapshot_dir}
-
-<i>请先创建快照</i>" "$(menu_back)"
-        return
-    fi
+❌ 快照目录不存在" "$menu_back" && return
     
-    local snapshots=()
-    while IFS= read -r -d '' file; do
-        if [[ "$file" != *.sha256 ]]; then
-            snapshots+=("$file")
-        fi
-    done < <(find "$snapshot_dir" -maxdepth 1 -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    local snaps=()
+    while IFS= read -r -d '' f; do
+        [[ "$f" != *.sha256 ]] && snaps+=("$f")
+    done < <(find "$dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
     
-    if [[ ${#snapshots[@]} -eq 0 ]]; then
-        edit_message "$chat_id" "$message_id" "📋 <b>快照列表</b>
+    [[ ${#snaps[@]} -eq 0 ]] && edit_msg "$1" "$2" "📋 <b>快照列表</b>
 
 ❌ 暂无快照
 
-<i>点击「创建快照」开始备份</i>" "$(menu_back)"
-        return
-    fi
+<i>点击「创建快照」开始备份</i>" "$menu_back" && return
     
-    local text="📋 <b>快照列表</b>
+    local txt="📋 <b>快照列表</b>
 
-找到 ${#snapshots[@]} 个快照:
+找到 ${#snaps[@]} 个快照:
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
 "
-    
-    local idx=1
-    for file in "${snapshots[@]}"; do
-        local name=$(basename "$file")
-        local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
-        local size_human=$(format_bytes "$size")
-        local date=$(date -r "$file" "+%m-%d %H:%M" 2>/dev/null || echo "未知")
-        local checksum="❌"
-        [[ -f "${file}.sha256" ]] && checksum="✅"
-        
-        text+="${idx}. <b>${name}</b>
-   📦 ${size_human} | 📅 ${date} | ${checksum}
+    local i=1
+    for f in "${snaps[@]}"; do
+        local n=$(basename "$f")
+        local s=$(stat -c%s "$f" 2>/dev/null || echo 0)
+        local sz=$(format_bytes "$s")
+        local dt=$(date -r "$f" "+%m-%d %H:%M" 2>/dev/null || echo "未知")
+        local ck="❌"; [[ -f "${f}.sha256" ]] && ck="✅"
+        txt+="${i}. <b>${n}</b>
+   📦 ${sz} | 📅 ${dt} | ${ck}
 
 "
-        ((idx++))
-        
-        # 限制显示数量避免消息过长
-        [[ $idx -gt 20 ]] && text+="<i>... 还有 $((${#snapshots[@]} - 20)) 个快照未显示</i>
+        ((i++))
+        [[ $i -gt 15 ]] && txt+="<i>... 还有 $((${#snaps[@]} - 15)) 个未显示</i>
 
 " && break
     done
     
-    edit_message "$chat_id" "$message_id" "$text" "$(menu_back)"
+    edit_msg "$1" "$2" "$txt" "$menu_back"
 }
 
 cb_backup() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
-    # 检查远程备份是否启用
+    answer_cb "$3"
     source "$CONFIG_FILE"
-    local remote_enabled="no"
-    if [[ "$(echo ${REMOTE_ENABLED:-false} | tr '[:upper:]' '[:lower:]')" =~ ^(y|yes|true)$ ]]; then
-        remote_enabled="yes"
-    fi
+    local remote="no"
+    [[ "$(echo ${REMOTE_ENABLED:-false} | tr A-Z a-z)" =~ ^(y|yes|true)$ ]] && remote="yes"
     
-    if [[ "$remote_enabled" == "yes" ]]; then
-        edit_message "$chat_id" "$message_id" "🔄 <b>创建快照</b>
+    if [[ "$remote" == "yes" ]]; then
+        local kb='{"inline_keyboard":[[{"text":"✅ 创建并上传","callback_data":"backup_exec_upload"}],[{"text":"💾 仅本地备份","callback_data":"backup_exec_local"}],[{"text":"❌ 取消","callback_data":"main"}]]}'
+        edit_msg "$1" "$2" "🔄 <b>创建快照</b>
 
 ⚠️ <b>注意事项</b>
-• 备份需要 3-10 分钟
-• 期间请勿关闭服务器
-• 完成后会收到通知
+- 备份需要 3-10 分钟
+- 期间请勿关闭服务器
+- 完成后会收到通知
 
 🌐 <b>远程备份已启用</b>
 是否上传到远程服务器？
 
-💡 <i>上传会消耗额外时间和带宽</i>" "$(menu_confirm_backup yes)"
+💡 <i>上传会消耗额外时间和带宽</i>" "$kb"
     else
-        edit_message "$chat_id" "$message_id" "🔄 <b>创建快照</b>
+        local kb='{"inline_keyboard":[[{"text":"✅ 确认创建","callback_data":"backup_exec_local"}],[{"text":"❌ 取消","callback_data":"main"}]]}'
+        edit_msg "$1" "$2" "🔄 <b>创建快照</b>
 
 ⚠️ <b>注意事项</b>
-• 备份需要 3-10 分钟
-• 期间请勿关闭服务器
-• 完成后会收到通知
+- 备份需要 3-10 分钟
+- 期间请勿关闭服务器
+- 完成后会收到通知
 
-确认创建快照？" "$(menu_confirm_backup no)"
+确认创建快照？" "$kb"
     fi
 }
 
 cb_backup_exec() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local upload="$4"
-    
-    answer_callback "$callback_id" "⏳ 开始创建快照..."
-    
-    edit_message "$chat_id" "$message_id" "🔄 <b>备份进行中</b>
+    answer_cb "$3" "⏳ 开始创建快照..."
+    edit_msg "$1" "$2" "🔄 <b>备份进行中</b>
 
 ⏳ 正在创建系统快照...
 📦 压缩文件中...
@@ -397,34 +210,18 @@ cb_backup_exec() {
 
 💡 备份完成后会自动通知您"
     
-    # 在后台执行备份
     (
-        if [[ "$upload" == "upload" ]]; then
+        if [[ "$4" == "upload" ]]; then
             UPLOAD_REMOTE="yes" bash /opt/snapsync/modules/backup.sh &>/dev/null
         else
             UPLOAD_REMOTE="no" bash /opt/snapsync/modules/backup.sh &>/dev/null
-        fi
-        
-        if [[ $? -eq 0 ]]; then
-            log "[BACKUP] 手动备份完成 (upload: $upload)"
-        else
-            log "[ERROR] 手动备份失败"
-            send_message "$chat_id" "❌ <b>备份失败</b>
-
-请查看日志了解详情
-或使用「测试连接」排查问题" "$(menu_back)"
         fi
     ) &
 }
 
 cb_restore() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
-    edit_message "$chat_id" "$message_id" "♻️ <b>系统恢复指南</b>
+    answer_cb "$3"
+    edit_msg "$1" "$2" "♻️ <b>系统恢复指南</b>
 
 ⚠️ <b>重要提示</b>
 系统恢复需要在服务器上操作
@@ -439,142 +236,100 @@ Bot 无法直接执行恢复命令
 <code>sudo snapsync-restore</code>
 
 3️⃣ 按照提示操作
-• 选择恢复来源（本地/远程）
-• 选择快照文件
-• 选择恢复模式（智能/完全）
-• 确认并执行
+- 选择恢复来源（本地/远程）
+- 选择快照文件
+- 选择恢复模式（智能/完全）
+- 确认并执行
 
 4️⃣ 恢复完成后重启
 <code>sudo reboot</code>
 
 💡 <b>建议</b>
-• 使用「智能恢复」模式保留网络配置
-• 恢复前备份重要数据
-• 测试环境先验证
-
-<i>需要帮助？查看完整文档</i>" "$(menu_back)"
+- 使用「智能恢复」模式保留网络配置
+- 恢复前备份重要数据
+- 测试环境先验证" "$menu_back"
 }
 
 cb_delete() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
+    answer_cb "$3"
+    local dir="${BACKUP_DIR}/system_snapshots"
+    local snaps=()
+    while IFS= read -r -d '' f; do
+        [[ "$f" != *.sha256 ]] && snaps+=("$f")
+    done < <(find "$dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
     
-    answer_callback "$callback_id"
-    
-    local snapshot_dir="${BACKUP_DIR}/system_snapshots"
-    local snapshots=()
-    
-    while IFS= read -r -d '' file; do
-        if [[ "$file" != *.sha256 ]]; then
-            snapshots+=("$file")
-        fi
-    done < <(find "$snapshot_dir" -maxdepth 1 -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
-    
-    if [[ ${#snapshots[@]} -eq 0 ]]; then
-        edit_message "$chat_id" "$message_id" "🗑️ <b>删除快照</b>
+    [[ ${#snaps[@]} -eq 0 ]] && edit_msg "$1" "$2" "🗑️ <b>删除快照</b>
 
-❌ 暂无可删除的快照" "$(menu_back)"
-        return
-    fi
+❌ 暂无可删除的快照" "$menu_back" && return
     
-    # 保存快照列表
-    printf "%s\n" "${snapshots[@]}" > "/tmp/snapshots_${chat_id}.txt"
+    printf "%s\n" "${snaps[@]}" > "/tmp/snapshots_$1.txt"
     
-    # 构建按钮（最多显示10个）
-    local buttons='['
-    local idx=0
-    for file in "${snapshots[@]}"; do
-        [[ $idx -ge 10 ]] && break
-        local name=$(basename "$file")
-        local short_name="${name:17:20}"  # 截取部分名称
-        buttons+="[{\"text\":\"$((idx+1)). ${short_name}...\",\"callback_data\":\"del_${idx}\"}],"
-        ((idx++))
+    local btns='['
+    local i=0
+    for f in "${snaps[@]}"; do
+        [[ $i -ge 10 ]] && break
+        local n=$(basename "$f")
+        local sn="${n:17:20}"
+        btns+="[{\"text\":\"$((i+1)). ${sn}...\",\"callback_data\":\"del_${i}\"}],"
+        ((i++))
     done
-    buttons="${buttons%,}]"
+    btns="${btns%,}]"
+    local kb="{\"inline_keyboard\":${btns},[{\"text\":\"🔙 返回主菜单\",\"callback_data\":\"main\"}]}"
     
-    local menu="{\"inline_keyboard\":${buttons},[{\"text\":\"🔙 返回主菜单\",\"callback_data\":\"main\"}]}"
-    
-    edit_message "$chat_id" "$message_id" "🗑️ <b>删除快照</b>
+    edit_msg "$1" "$2" "🗑️ <b>删除快照</b>
 
-找到 ${#snapshots[@]} 个快照
+找到 ${#snaps[@]} 个快照
 请选择要删除的快照:
 
 ⚠️ <b>删除后无法恢复</b>
-${idx}/10 显示，完整列表见「快照列表」" "$menu"
+显示前 $i 个，完整列表见「快照列表」" "$kb"
 }
 
 cb_delete_confirm() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local idx="$4"
+    answer_cb "$3"
+    local snaps=(); while IFS= read -r l; do snaps+=("$l"); done < "/tmp/snapshots_$1.txt"
+    local f="${snaps[$4]}"
+    local n=$(basename "$f")
+    local s=$(stat -c%s "$f" 2>/dev/null || echo 0)
+    local sz=$(format_bytes "$s")
     
-    answer_callback "$callback_id"
-    
-    local snapshots=()
-    while IFS= read -r line; do
-        snapshots+=("$line")
-    done < "/tmp/snapshots_${chat_id}.txt"
-    
-    local file="${snapshots[$idx]}"
-    local name=$(basename "$file")
-    local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
-    local size_human=$(format_bytes "$size")
-    
-    edit_message "$chat_id" "$message_id" "🗑️ <b>确认删除</b>
+    local kb="{\"inline_keyboard\":[[{\"text\":\"✅ 确认删除\",\"callback_data\":\"delx_$4\"}],[{\"text\":\"❌ 取消\",\"callback_data\":\"delete\"}]]}"
+    edit_msg "$1" "$2" "🗑️ <b>确认删除</b>
 
-📸 快照: <code>${name}</code>
-📦 大小: ${size_human}
+📸 快照: <code>${n}</code>
+📦 大小: ${sz}
 
 ⚠️ <b>此操作不可撤销！</b>
-确认删除？" "{\"inline_keyboard\":[[{\"text\":\"✅ 确认删除\",\"callback_data\":\"delx_${idx}\"}],[{\"text\":\"❌ 取消\",\"callback_data\":\"delete\"}]]}"
+确认删除？" "$kb"
 }
 
-cb_delete_execute() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local idx="$4"
+cb_delete_exec() {
+    answer_cb "$3" "🗑️ 正在删除..."
+    local snaps=(); while IFS= read -r l; do snaps+=("$l"); done < "/tmp/snapshots_$1.txt"
+    local f="${snaps[$4]}"
+    local n=$(basename "$f")
     
-    answer_callback "$callback_id" "🗑️ 正在删除..."
-    
-    local snapshots=()
-    while IFS= read -r line; do
-        snapshots+=("$line")
-    done < "/tmp/snapshots_${chat_id}.txt"
-    
-    local file="${snapshots[$idx]}"
-    local name=$(basename "$file")
-    
-    if rm -f "$file" "${file}.sha256" 2>/dev/null; then
-        edit_message "$chat_id" "$message_id" "✅ <b>删除成功</b>
+    if rm -f "$f" "${f}.sha256" 2>/dev/null; then
+        edit_msg "$1" "$2" "✅ <b>删除成功</b>
 
-📸 ${name}
+📸 ${n}
 
-已从系统中移除" "$(menu_back)"
-        log "[DELETE] 删除快照: $name"
+已从系统中移除" "$menu_back"
+        log "删除快照: $n"
     else
-        edit_message "$chat_id" "$message_id" "❌ <b>删除失败</b>
+        edit_msg "$1" "$2" "❌ <b>删除失败</b>
 
-📸 ${name}
+📸 ${n}
 
-可能权限不足或文件不存在" "$(menu_back)"
+可能权限不足或文件不存在" "$menu_back"
     fi
-    
-    rm -f "/tmp/snapshots_${chat_id}.txt"
+    rm -f "/tmp/snapshots_$1.txt"
 }
 
 cb_config() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
+    answer_cb "$3"
     source "$CONFIG_FILE"
-    
-    edit_message "$chat_id" "$message_id" "⚙️ <b>配置管理</b>
+    edit_msg "$1" "$2" "⚙️ <b>配置管理</b>
 
 📦 本地保留: ${LOCAL_KEEP_COUNT:-5} 个
 🌐 远程保留: ${REMOTE_KEEP_DAYS:-30} 天
@@ -583,74 +338,51 @@ cb_config() {
 🗜️ 压缩级别: ${COMPRESSION_LEVEL:-6}
 🌐 远程备份: ${REMOTE_ENABLED:-false}
 
-<i>点击下方选项修改配置</i>" "$(menu_config)"
+<i>点击下方选项修改配置</i>" "$menu_config"
 }
 
 cb_config_retention() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
+    answer_cb "$3"
     source "$CONFIG_FILE"
-    
-    edit_message "$chat_id" "$message_id" "📦 <b>快照保留策略</b>
+    edit_msg "$1" "$2" "📦 <b>快照保留策略</b>
 
 当前配置:
-• 本地保留: ${LOCAL_KEEP_COUNT:-5} 个
-• 远程保留: ${REMOTE_KEEP_DAYS:-30} 天
+- 本地保留: ${LOCAL_KEEP_COUNT:-5} 个
+- 远程保留: ${REMOTE_KEEP_DAYS:-30} 天
 
 <b>修改方法</b>
 发送格式: <code>本地数量 远程天数</code>
 
 示例:
 <code>10 60</code> - 本地保留10个，远程保留60天
-<code>5 30</code> - 本地保留5个，远程保留30天
 
-<i>发送配置或返回</i>" "$(menu_back)"
-    
-    echo "cfg_retention" > "/tmp/config_${chat_id}.txt"
+<i>发送配置或返回</i>" "$menu_back"
+    echo "cfg_retention" > "/tmp/config_$1.txt"
 }
 
 cb_config_schedule() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
+    answer_cb "$3"
     source "$CONFIG_FILE"
-    
-    edit_message "$chat_id" "$message_id" "⏰ <b>备份计划</b>
+    edit_msg "$1" "$2" "⏰ <b>备份计划</b>
 
 当前配置:
-• 备份间隔: ${BACKUP_INTERVAL_DAYS:-7} 天
-• 备份时间: ${BACKUP_TIME:-03:00}
+- 备份间隔: ${BACKUP_INTERVAL_DAYS:-7} 天
+- 备份时间: ${BACKUP_TIME:-03:00}
 
 <b>修改方法</b>
 发送格式: <code>间隔天数 时间</code>
 
 示例:
-<code>1 02:00</code> - 每天凌晨2点
-<code>7 03:30</code> - 每7天凌晨3:30
-<code>30 04:00</code> - 每30天凌晨4点
+<code>7 03:00</code> - 每7天凌晨3点
 
-<i>发送配置或返回</i>" "$(menu_back)"
-    
-    echo "cfg_schedule" > "/tmp/config_${chat_id}.txt"
+<i>发送配置或返回</i>" "$menu_back"
+    echo "cfg_schedule" > "/tmp/config_$1.txt"
 }
 
 cb_config_compress() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
+    answer_cb "$3"
     source "$CONFIG_FILE"
-    
-    edit_message "$chat_id" "$message_id" "🗜️ <b>压缩级别</b>
+    edit_msg "$1" "$2" "🗜️ <b>压缩级别</b>
 
 当前: ${COMPRESSION_LEVEL:-6}
 
@@ -660,83 +392,48 @@ cb_config_compress() {
 6️⃣ 平衡 - 推荐，性能最优
 9️⃣ 最高 - 压缩率最高，速度慢
 
-<i>选择压缩级别</i>" "$(menu_compress_level)"
+<i>选择压缩级别</i>" "$menu_compress"
 }
 
 cb_config_remote() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
+    answer_cb "$3"
     source "$CONFIG_FILE"
+    local st="❌ 禁用"
+    [[ "$(echo ${REMOTE_ENABLED:-false} | tr A-Z a-z)" =~ ^(y|yes|true)$ ]] && st="✅ 启用"
     
-    local status="❌ 禁用"
-    if [[ "$(echo ${REMOTE_ENABLED:-false} | tr '[:upper:]' '[:lower:]')" =~ ^(y|yes|true)$ ]]; then
-        status="✅ 启用"
-    fi
-    
-    edit_message "$chat_id" "$message_id" "🌐 <b>远程备份</b>
+    edit_msg "$1" "$2" "🌐 <b>远程备份</b>
 
-当前状态: ${status}
+当前状态: ${st}
 
 服务器: ${REMOTE_HOST:-未配置}
 用户: ${REMOTE_USER:-root}
 端口: ${REMOTE_PORT:-22}
 
 <b>注意</b>
-启用前请确保:
-• SSH密钥已配置
-• 远程服务器可访问
-• 网络连接稳定
+启用前请确保已配置SSH密钥
 
-<i>选择操作</i>" "$(menu_remote_toggle)"
+<i>选择操作</i>" "$menu_remote"
 }
 
 cb_compress_set() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local level="$4"
-    
-    answer_callback "$callback_id" "✅ 压缩级别已设置为 $level"
-    
-    sed -i "s|^COMPRESSION_LEVEL=.*|COMPRESSION_LEVEL=\"$level\"|" "$CONFIG_FILE"
-    
-    cb_config "$chat_id" "$message_id" "$callback_id"
-    log "[CONFIG] 压缩级别设置为: $level"
+    answer_cb "$3" "✅ 压缩级别已设置为 $4"
+    sed -i "s|^COMPRESSION_LEVEL=.*|COMPRESSION_LEVEL=\"$4\"|" "$CONFIG_FILE"
+    cb_config "$1" "$2" "$3"
+    log "压缩级别设置为: $4"
 }
 
 cb_remote_toggle() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local action="$4"
-    
-    local value="false"
-    local status="禁用"
-    if [[ "$action" == "on" ]]; then
-        value="true"
-        status="启用"
-    fi
-    
-    answer_callback "$callback_id" "✅ 远程备份已${status}"
-    
-    sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"$value\"|" "$CONFIG_FILE"
-    
-    cb_config "$chat_id" "$message_id" "$callback_id"
-    log "[CONFIG] 远程备份: $value"
+    local v="false" st="禁用"
+    [[ "$4" == "on" ]] && v="true" && st="启用"
+    answer_cb "$3" "✅ 远程备份已${st}"
+    sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"$v\"|" "$CONFIG_FILE"
+    cb_config "$1" "$2" "$3"
+    log "远程备份: $v"
 }
 
 cb_logs() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
-    edit_message "$chat_id" "$message_id" "📝 <b>查看日志</b>
+    answer_cb "$3"
+    edit_msg "$1" "$2" "📝 <b>查看日志</b>
 
 选择要查看的日志:
 
@@ -744,425 +441,224 @@ cb_logs() {
 📗 恢复日志 - 系统恢复记录  
 📙 Bot日志 - Bot运行记录
 
-<i>显示最近50行</i>" "$(menu_logs)"
+<i>显示最近50行</i>" "$menu_logs"
 }
 
 cb_log_view() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local log_type="$4"
-    
-    answer_callback "$callback_id"
-    
-    local log_file=""
-    local title=""
-    
-    case "$log_type" in
-        backup)
-            log_file="/var/log/snapsync/backup.log"
-            title="📘 备份日志"
-            ;;
-        restore)
-            log_file="/var/log/snapsync/restore.log"
-            title="📗 恢复日志"
-            ;;
-        bot)
-            log_file="/var/log/snapsync/bot.log"
-            title="📙 Bot日志"
-            ;;
+    answer_cb "$3"
+    local lf="" ti=""
+    case "$4" in
+        backup) lf="/var/log/snapsync/backup.log"; ti="📘 备份日志" ;;
+        restore) lf="/var/log/snapsync/restore.log"; ti="📗 恢复日志" ;;
+        bot) lf="/var/log/snapsync/bot.log"; ti="📙 Bot日志" ;;
     esac
     
-    if [[ ! -f "$log_file" ]]; then
-        edit_message "$chat_id" "$message_id" "${title}
+    [[ ! -f "$lf" ]] && edit_msg "$1" "$2" "${ti}
 
-❌ 日志文件不存在
-
-<i>可能还没有相关操作记录</i>" "$(menu_back)"
-        return
-    fi
+❌ 日志文件不存在" "$menu_back" && return
     
-    local log_content=$(tail -50 "$log_file" | sed 's/</\&lt;/g; s/>/\&gt;/g')
+    local log=$(tail -50 "$lf" | sed 's/</\&lt;/g; s/>/\&gt;/g')
+    [[ ${#log} -gt 3000 ]] && log="${log: -3000}"
     
-    # 限制消息长度
-    if [[ ${#log_content} -gt 3000 ]]; then
-        log_content="${log_content: -3000}"
-        log_content="... (内容过长，仅显示末尾)
+    edit_msg "$1" "$2" "${ti}
 
-$log_content"
-    fi
-    
-    edit_message "$chat_id" "$message_id" "${title}
+<code>${log}</code>
 
-<code>${log_content}</code>
-
-<i>最近50行记录</i>" "$(menu_back)"
+<i>最近50行</i>" "$menu_back"
 }
 
 cb_test() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id"
-    
-    edit_message "$chat_id" "$message_id" "🔌 <b>连接测试</b>
+    answer_cb "$3"
+    edit_msg "$1" "$2" "🔌 <b>连接测试</b>
 
 选择要测试的连接:
 
 🌐 远程服务器 - SSH连接测试
 📱 Telegram - API连接测试
 
-<i>测试可能需要几秒钟</i>" "$(menu_test)"
+<i>测试可能需要几秒钟</i>" "$menu_test"
 }
 
 cb_test_remote() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    
-    answer_callback "$callback_id" "⏳ 测试中..."
-    
+    answer_cb "$3" "⏳ 测试中..."
     source "$CONFIG_FILE"
     
-    if [[ -z "${REMOTE_HOST:-}" ]]; then
-        edit_message "$chat_id" "$message_id" "🌐 <b>远程服务器测试</b>
+    [[ -z "${REMOTE_HOST:-}" ]] && edit_msg "$1" "$2" "🌐 <b>远程服务器测试</b>
 
-❌ 未配置远程服务器
-
-请先在配置管理中设置" "$(menu_back)"
-        return
-    fi
+❌ 未配置远程服务器" "$menu_back" && return
     
-    local result="⏳ 正在测试..."
-    edit_message "$chat_id" "$message_id" "🌐 <b>远程服务器测试</b>
-
-服务器: ${REMOTE_HOST}
-用户: ${REMOTE_USER}
-端口: ${REMOTE_PORT}
-
-$result"
+    local key="/root/.ssh/id_ed25519"
+    local res=""
     
-    # 执行测试
-    local ssh_key="/root/.ssh/id_ed25519"
-    local test_output=""
-    
-    if [[ ! -f "$ssh_key" ]]; then
-        result="❌ SSH密钥不存在
-
-路径: $ssh_key
-需要先生成密钥并添加到远程服务器"
-    elif ssh -i "$ssh_key" -p "${REMOTE_PORT}" \
-              -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=10 \
-              -o BatchMode=yes \
+    if [[ ! -f "$key" ]]; then
+        res="❌ SSH密钥不存在"
+    elif ssh -i "$key" -p "${REMOTE_PORT}" -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 -o BatchMode=yes \
               "${REMOTE_USER}@${REMOTE_HOST}" "echo ok" &>/dev/null; then
-        result="✅ 连接成功
+        res="✅ 连接成功
 
 SSH密钥验证通过
 远程服务器正常响应"
     else
-        result="❌ 连接失败
+        res="❌ 连接失败
 
 可能原因:
-• SSH密钥未添加到远程服务器
-• 远程服务器不可达
-• 防火墙阻止连接
-• 端口配置错误
-
-排查命令:
-<code>ssh -i $ssh_key -p ${REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}</code>"
+- SSH密钥未添加到远程服务器
+- 远程服务器不可达
+- 防火墙阻止连接"
     fi
     
-    edit_message "$chat_id" "$message_id" "🌐 <b>远程服务器测试</b>
+    edit_msg "$1" "$2" "🌐 <b>远程服务器测试</b>
 
 服务器: ${REMOTE_HOST}
 用户: ${REMOTE_USER}
 端口: ${REMOTE_PORT}
 
-$result" "$(menu_back)"
+$res" "$menu_back"
 }
 
-cb_test_telegram() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
+cb_test_tg() {
+    answer_cb "$3" "⏳ 测试中..."
+    local test=$(curl -sS -m 10 "${API}/getMe" 2>&1)
+    local res=""
     
-    answer_callback "$callback_id" "⏳ 测试中..."
-    
-    edit_message "$chat_id" "$message_id" "📱 <b>Telegram 测试</b>
+    if echo "$test" | grep -q '"ok":true'; then
+        local un=$(echo "$test" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+        res="✅ Telegram API 正常
 
-⏳ 正在测试API连接..."
-    
-    # 测试 getMe
-    local result=""
-    local api_test=$(curl -sS -m 10 "${API}/getMe" 2>&1)
-    
-    if echo "$api_test" | grep -q '"ok":true'; then
-        local bot_username=$(echo "$api_test" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
-        result="✅ Telegram API 正常
-
-Bot用户名: @${bot_username}
+Bot用户名: @${un}
 连接状态: 正常
-消息发送: 正常
 
-如果你看到这条消息，说明:
-• Bot Token 配置正确
-• 网络连接正常
-• 消息推送正常"
+如果你看到这条消息，说明配置正确"
     else
-        result="❌ API测试失败
+        res="❌ API测试失败
 
 可能原因:
-• Bot Token 错误
-• 网络无法访问Telegram
-• 需要代理
-
-响应: ${api_test:0:200}"
+- Bot Token 错误
+- 网络无法访问Telegram"
     fi
     
-    edit_message "$chat_id" "$message_id" "📱 <b>Telegram 测试</b>
+    edit_msg "$1" "$2" "📱 <b>Telegram 测试</b>
 
-$result" "$(menu_back)"
+$res" "$menu_back"
 }
 
-# ===== 文本消息处理 =====
+# 文本处理
 handle_text() {
-    local chat_id="$1"
-    local text="$2"
+    local cid="$1" txt="$2"
     
-    log_debug "收到文本: $text from $chat_id"
+    [[ "$txt" == "/start" ]] && rm -f "/tmp/config_$cid.txt" && cmd_start "$cid" && return
     
-    # 处理命令
-    if [[ "$text" == "/start" ]]; then
-        rm -f "/tmp/config_${chat_id}.txt" 2>/dev/null
-        cmd_start "$chat_id"
-        return
-    fi
-    
-    # 检查是否在配置模式
-    local config_mode=$(cat "/tmp/config_${chat_id}.txt" 2>/dev/null)
-    
-    if [[ -z "$config_mode" ]]; then
-        send_message "$chat_id" "❓ 未知命令
+    local mode=$(cat "/tmp/config_$cid.txt" 2>/dev/null || echo "")
+    [[ -z "$mode" ]] && send_msg "$cid" "❓ 未知命令
 
-发送 /start 打开主菜单" "$(menu_main)"
-        return
-    fi
+发送 /start 打开主菜单" "$menu_main" && return
     
-    # 处理配置输入
-    case "$config_mode" in
+    case "$mode" in
         cfg_retention)
-            if [[ "$text" =~ ^([0-9]+)\ +([0-9]+)$ ]]; then
-                local local_keep="${BASH_REMATCH[1]}"
-                local remote_keep="${BASH_REMATCH[2]}"
-                
-                sed -i "s|^LOCAL_KEEP_COUNT=.*|LOCAL_KEEP_COUNT=\"$local_keep\"|" "$CONFIG_FILE"
-                sed -i "s|^REMOTE_KEEP_DAYS=.*|REMOTE_KEEP_DAYS=\"$remote_keep\"|" "$CONFIG_FILE"
-                
-                send_message "$chat_id" "✅ <b>保留策略已更新</b>
+            if [[ "$txt" =~ ^([0-9]+)\ +([0-9]+)$ ]]; then
+                local lk="${BASH_REMATCH[1]}" rk="${BASH_REMATCH[2]}"
+                sed -i "s|^LOCAL_KEEP_COUNT=.*|LOCAL_KEEP_COUNT=\"$lk\"|" "$CONFIG_FILE"
+                sed -i "s|^REMOTE_KEEP_DAYS=.*|REMOTE_KEEP_DAYS=\"$rk\"|" "$CONFIG_FILE"
+                send_msg "$cid" "✅ <b>保留策略已更新</b>
 
-📦 本地保留: ${local_keep} 个
-🌐 远程保留: ${remote_keep} 天" "$(menu_main)"
-                
-                rm -f "/tmp/config_${chat_id}.txt"
-                log "[CONFIG] 保留策略更新: local=$local_keep, remote=$remote_keep"
+📦 本地保留: ${lk} 个
+🌐 远程保留: ${rk} 天" "$menu_main"
+                rm -f "/tmp/config_$cid.txt"
+                log "保留策略: local=$lk, remote=$rk"
             else
-                send_message "$chat_id" "❌ <b>格式错误</b>
+                send_msg "$cid" "❌ <b>格式错误</b>
 
 请使用: <code>本地数量 远程天数</code>
-
-示例: <code>10 60</code>" "$(menu_back)"
+示例: <code>10 60</code>" "$menu_back"
             fi
             ;;
-            
         cfg_schedule)
-            if [[ "$text" =~ ^([0-9]+)\ +([0-9]{2}:[0-9]{2})$ ]]; then
-                local interval="${BASH_REMATCH[1]}"
-                local time="${BASH_REMATCH[2]}"
-                
-                sed -i "s|^BACKUP_INTERVAL_DAYS=.*|BACKUP_INTERVAL_DAYS=\"$interval\"|" "$CONFIG_FILE"
-                sed -i "s|^BACKUP_TIME=.*|BACKUP_TIME=\"$time\"|" "$CONFIG_FILE"
-                
-                send_message "$chat_id" "✅ <b>备份计划已更新</b>
+            if [[ "$txt" =~ ^([0-9]+)\ +([0-9]{2}:[0-9]{2})$ ]]; then
+                local iv="${BASH_REMATCH[1]}" tm="${BASH_REMATCH[2]}"
+                sed -i "s|^BACKUP_INTERVAL_DAYS=.*|BACKUP_INTERVAL_DAYS=\"$iv\"|" "$CONFIG_FILE"
+                sed -i "s|^BACKUP_TIME=.*|BACKUP_TIME=\"$tm\"|" "$CONFIG_FILE"
+                send_msg "$cid" "✅ <b>备份计划已更新</b>
 
-⏰ 间隔: 每 ${interval} 天
-🕐 时间: ${time}
+⏰ 间隔: 每 ${iv} 天
+🕐 时间: ${tm}
 
-<i>需要重启定时器生效</i>
-重启命令: <code>systemctl restart snapsync-backup.timer</code>" "$(menu_main)"
-                
-                rm -f "/tmp/config_${chat_id}.txt"
-                log "[CONFIG] 备份计划更新: interval=$interval, time=$time"
+<i>需重启定时器生效</i>
+<code>systemctl restart snapsync-backup.timer</code>" "$menu_main"
+                rm -f "/tmp/config_$cid.txt"
+                log "备份计划: interval=$iv, time=$tm"
             else
-                send_message "$chat_id" "❌ <b>格式错误</b>
+                send_msg "$cid" "❌ <b>格式错误</b>
 
 请使用: <code>间隔天数 时间</code>
-
-示例: <code>7 03:00</code>" "$(menu_back)"
+示例: <code>7 03:00</code>" "$menu_back"
             fi
             ;;
     esac
 }
 
-# ===== 回调路由 =====
-route_callback() {
-    local chat_id="$1"
-    local message_id="$2"
-    local callback_id="$3"
-    local data="$4"
-    
-    log "[CB] $data from $chat_id"
+# 路由
+route() {
+    local cid="$1" mid="$2" cbid="$3" data="$4"
+    log "回调: $data from $cid/$mid"
     
     case "$data" in
-        main) cb_main "$chat_id" "$message_id" "$callback_id" ;;
-        status) cb_status "$chat_id" "$message_id" "$callback_id" ;;
-        list) cb_list "$chat_id" "$message_id" "$callback_id" ;;
-        backup) cb_backup "$chat_id" "$message_id" "$callback_id" ;;
-        backup_exec_local) cb_backup_exec "$chat_id" "$message_id" "$callback_id" "local" ;;
-        backup_exec_upload) cb_backup_exec "$chat_id" "$message_id" "$callback_id" "upload" ;;
-        restore) cb_restore "$chat_id" "$message_id" "$callback_id" ;;
-        delete) cb_delete "$chat_id" "$message_id" "$callback_id" ;;
-        del_*) cb_delete_confirm "$chat_id" "$message_id" "$callback_id" "${data#del_}" ;;
-        delx_*) cb_delete_execute "$chat_id" "$message_id" "$callback_id" "${data#delx_}" ;;
-        config) cb_config "$chat_id" "$message_id" "$callback_id" ;;
-        cfg_retention) cb_config_retention "$chat_id" "$message_id" "$callback_id" ;;
-        cfg_schedule) cb_config_schedule "$chat_id" "$message_id" "$callback_id" ;;
-        cfg_compress) cb_config_compress "$chat_id" "$message_id" "$callback_id" ;;
-        cfg_remote) cb_config_remote "$chat_id" "$message_id" "$callback_id" ;;
-        cmp_*) cb_compress_set "$chat_id" "$message_id" "$callback_id" "${data#cmp_}" ;;
-        rmt_on) cb_remote_toggle "$chat_id" "$message_id" "$callback_id" "on" ;;
-        rmt_off) cb_remote_toggle "$chat_id" "$message_id" "$callback_id" "off" ;;
-        logs) cb_logs "$chat_id" "$message_id" "$callback_id" ;;
-        log_backup) cb_log_view "$chat_id" "$message_id" "$callback_id" "backup" ;;
-        log_restore) cb_log_view "$chat_id" "$message_id" "$callback_id" "restore" ;;
-        log_bot) cb_log_view "$chat_id" "$message_id" "$callback_id" "bot" ;;
-        test) cb_test "$chat_id" "$message_id" "$callback_id" ;;
-        test_remote) cb_test_remote "$chat_id" "$message_id" "$callback_id" ;;
-        test_tg) cb_test_telegram "$chat_id" "$message_id" "$callback_id" ;;
-        *) answer_callback "$callback_id" "❌ 未知操作" ;;
+        main) cb_main "$cid" "$mid" "$cbid" ;;
+        status) cb_status "$cid" "$mid" "$cbid" ;;
+        list) cb_list "$cid" "$mid" "$cbid" ;;
+        backup) cb_backup "$cid" "$mid" "$cbid" ;;
+        backup_exec_local) cb_backup_exec "$cid" "$mid" "$cbid" "local" ;;
+        backup_exec_upload) cb_backup_exec "$cid" "$mid" "$cbid" "upload" ;;
+        restore) cb_restore "$cid" "$mid" "$cbid" ;;
+        delete) cb_delete "$cid" "$mid" "$cbid" ;;
+        del_*) cb_delete_confirm "$cid" "$mid" "$cbid" "${data#del_}" ;;
+        delx_*) cb_delete_exec "$cid" "$mid" "$cbid" "${data#delx_}" ;;
+        config) cb_config "$cid" "$mid" "$cbid" ;;
+        cfg_retention) cb_config_retention "$cid" "$mid" "$cbid" ;;
+        cfg_schedule) cb_config_schedule "$cid" "$mid" "$cbid" ;;
+        cfg_compress) cb_config_compress "$cid" "$mid" "$cbid" ;;
+        cfg_remote) cb_config_remote "$cid" "$mid" "$cbid" ;;
+        cmp_*) cb_compress_set "$cid" "$mid" "$cbid" "${data#cmp_}" ;;
+        rmt_on) cb_remote_toggle "$cid" "$mid" "$cbid" "on" ;;
+        rmt_off) cb_remote_toggle "$cid" "$mid" "$cbid" "off" ;;
+        logs) cb_logs "$cid" "$mid" "$cbid" ;;
+        log_backup) cb_log_view "$cid" "$mid" "$cbid" "backup" ;;
+        log_restore) cb_log_view "$cid" "$mid" "$cbid" "restore" ;;
+        log_bot) cb_log_view "$cid" "$mid" "$cbid" "bot" ;;
+        test) cb_test "$cid" "$mid" "$cbid" ;;
+        test_remote) cb_test_remote "$cid" "$mid" "$cbid" ;;
+        test_tg) cb_test_tg "$cid" "$mid" "$cbid" ;;
     esac
 }
 
-# ===== 主循环 =====
-main() {
-    log "========== Bot 启动: $HOST =========="
-    log_debug "API: ${API:0:50}..."
-    log_debug "备份目录: $BACKUP_DIR"
+# 主循环
+log "Bot 启动: $HOST"
+[[ ! -f "$OFFSET_FILE" ]] && echo 0 > "$OFFSET_FILE"
+
+while true; do
+    offset=$(cat "$OFFSET_FILE")
+    resp=$(curl -sS -m 25 "${API}/getUpdates?offset=$offset&timeout=20" 2>/dev/null || echo "")
     
-    # 初始化 offset
-    if [[ ! -f "$OFFSET_FILE" ]]; then
-        log_debug "初始化 offset 文件"
-        local last=$(curl -sS -m 10 "${API}/getUpdates" 2>/dev/null | grep -o '"update_id":[0-9]*' | tail -1 | cut -d: -f2)
-        echo $((${last:-0} + 1)) > "$OFFSET_FILE"
-        log_debug "Offset 初始化为: $(cat $OFFSET_FILE)"
-    else
-        log_debug "当前 offset: $(cat $OFFSET_FILE)"
+    [[ -z "$resp" ]] && sleep 1 && continue
+    echo "$resp" | grep -q '"ok":true' || continue
+    
+    # 优先处理回调（避免同时处理文本和回调）
+    if echo "$resp" | grep -q '"callback_query"'; then
+        cid=$(echo "$resp" | grep -o '"chat":{"id":[0-9-]*' | grep -o '[0-9-]*' | head -1)
+        mid=$(echo "$resp" | grep -o '"message_id":[0-9]*' | head -1 | cut -d: -f2)
+        cbid=$(echo "$resp" | grep -o '"callback_query":{"id":"[^"]*"' | cut -d'"' -f4)
+        data=$(echo "$resp" | grep -o '"data":"[^"]*"' | head -1 | cut -d'"' -f4)
+        [[ -n "$cid" && -n "$mid" && -n "$cbid" && -n "$data" ]] && route "$cid" "$mid" "$cbid" "$data"
+    # 只有不是回调时才处理文本消息
+    elif echo "$resp" | grep -q '"message".*"text"'; then
+        cid=$(echo "$resp" | grep -o '"chat":{"id":[0-9-]*' | grep -o '[0-9-]*' | head -1)
+        txt=$(echo "$resp" | grep -o '"text":"[^"]*"' | head -1 | cut -d'"' -f4)
+        [[ -n "$cid" && -n "$txt" ]] && handle_text "$cid" "$txt"
     fi
     
-    log "主循环启动"
+    # 更新offset
+    last=$(echo "$resp" | grep -o '"update_id":[0-9]*' | tail -1 | cut -d: -f2)
+    [[ -n "$last" ]] && echo $((last + 1)) > "$OFFSET_FILE"
     
-    # 主循环
-    local loop_count=0
-    while true; do
-        ((loop_count++))
-        
-        # 每100次循环记录一次
-        if (( loop_count % 100 == 0 )); then
-            log_debug "主循环运行中... (循环 $loop_count 次)"
-        fi
-        
-        local offset=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
-        
-        log_debug "调用 getUpdates (offset=$offset)"
-        local response=$(curl -sS -m 30 "${API}/getUpdates?offset=$offset&timeout=25" 2>&1)
-        local curl_exit=$?
-        
-        if [[ $curl_exit -ne 0 ]]; then
-            log_debug "curl 失败 (退出码: $curl_exit)"
-            sleep 3
-            continue
-        fi
-        
-        if [[ -z "$response" ]]; then
-            log_debug "响应为空"
-            sleep 1
-            continue
-        fi
-        
-        if ! echo "$response" | grep -q '"ok":true'; then
-            log_debug "API 返回错误: ${response:0:100}"
-            sleep 1
-            continue
-        fi
-        
-        # 提取所有 update_id
-        local update_ids=$(echo "$response" | grep -o '"update_id":[0-9]*' | cut -d: -f2)
-        
-        if [[ -z "$update_ids" ]]; then
-            # 没有新消息
-            sleep 1
-            continue
-        fi
-        
-        log_debug "收到 $(echo "$update_ids" | wc -l) 个更新"
-        
-        # 处理每个更新
-        while read -r uid; do
-            [[ -z "$uid" ]] && continue
-            
-            log_debug "处理 update_id: $uid"
-            
-            # 提取当前更新的数据
-            local update=$(echo "$response" | grep -A 100 "\"update_id\":$uid" | grep -B 100 "\"update_id\":" | head -n -1)
-            
-            # 处理文本消息
-            if echo "$update" | grep -q '"message".*"text"'; then
-                local cid=$(echo "$update" | grep -o '"chat":{"id":[0-9-]*' | grep -o '[0-9-]*$' | head -1)
-                local txt=$(echo "$update" | grep -o '"text":"[^"]*"' | head -1 | cut -d'"' -f4)
-                
-                if [[ -n "$cid" && -n "$txt" ]]; then
-                    log_debug "文本消息: $cid -> $txt"
-                    handle_text "$cid" "$txt"
-                fi
-            
-            # 处理回调
-            elif echo "$update" | grep -q '"callback_query"'; then
-                local cid=$(echo "$update" | grep -o '"chat":{"id":[0-9-]*' | grep -o '[0-9-]*$' | head -1)
-                local mid=$(echo "$update" | grep -o '"message_id":[0-9]*' | head -1 | cut -d: -f2)
-                local cbid=$(echo "$update" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-                local data=$(echo "$update" | grep -o '"data":"[^"]*"' | head -1 | cut -d'"' -f4)
-                
-                if [[ -n "$cid" && -n "$mid" && -n "$cbid" && -n "$data" ]]; then
-                    log_debug "回调: $cid/$mid -> $data"
-                    route_callback "$cid" "$mid" "$cbid" "$data"
-                fi
-            else
-                log_debug "未知更新类型"
-            fi
-            
-            # 更新 offset
-            echo $((uid + 1)) > "$OFFSET_FILE"
-        done <<< "$update_ids"
-        
-        sleep 0.3
-    done
-}
-
-# ===== 启动检查 =====
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-    log "[ERROR] TELEGRAM_BOT_TOKEN 未配置"
-    exit 1
-fi
-
-if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-    log "[ERROR] TELEGRAM_CHAT_ID 未配置"
-    exit 1
-fi
-
-log "配置检查通过"
-log "Bot Token: ${TELEGRAM_BOT_TOKEN:0:20}..."
-log "Chat ID: ${TELEGRAM_CHAT_ID}"
-
-# 启动
-main
+    sleep 0.5
+done
