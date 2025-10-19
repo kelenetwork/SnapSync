@@ -1,10 +1,7 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 无损恢复模块（完整修复版）
-# 修复：
-# 1. log 函数输出到 stderr
-# 2. SSH 连接强制使用密钥认证
-# 3. 添加远程恢复功能
+# SnapSync v3.0 - 恢复模块（完整修复版）
+# 重点修复：远程快照下载和恢复逻辑
 
 set -euo pipefail
 
@@ -22,7 +19,7 @@ NC='\033[0m'
 # ===== 初始化 =====
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# ===== 工具函数（修复：输出到 stderr）=====
+# ===== 工具函数 =====
 log_info() {
     echo -e "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE" >&2
 }
@@ -82,7 +79,7 @@ load_config() {
     fi
 }
 
-# ===== 列出远程快照（修复：强制使用密钥认证）=====
+# ===== 列出远程快照（修复版）=====
 list_remote_snapshots() {
     local ssh_key="/root/.ssh/id_ed25519"
     
@@ -210,7 +207,7 @@ list_remote_snapshots() {
     return 0
 }
 
-# ===== 下载远程快照（修复：强制使用密钥认证）=====
+# ===== 下载远程快照（修复版）=====
 download_remote_snapshot() {
     local remote_file="$1"
     local local_dir="${BACKUP_DIR}/system_snapshots"
