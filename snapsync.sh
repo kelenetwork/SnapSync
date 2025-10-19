@@ -1,10 +1,6 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 主控制脚本（修复版）
-# 修复：
-# 1. 主菜单显示问题 - 增加错误处理
-# 2. 快照数量统计更健壮
-# 3. 磁盘使用率获取更安全
+# SnapSync v3.0 - 主控制脚本（完整版）
 
 set -euo pipefail
 
@@ -45,7 +41,6 @@ show_header() {
 }
 
 show_status_bar() {
-    # 修复：增加错误处理和默认值
     local backup_dir="/backups"
     local snapshot_count="0"
     local disk_usage="N/A"
@@ -98,7 +93,596 @@ show_main_menu() {
     echo ""
 }
 
-# [其他函数保持不变，只在文件末尾添加]
+# ===== 1. 创建快照 =====
+create_snapshot() {
+    show_header
+    log "${CYAN}创建系统快照${NC}\n"
+    
+    if [[ ! -f "$MODULE_DIR/backup.sh" ]]; then
+        log "${RED}错误: 备份模块不存在${NC}"
+        pause
+        return
+    fi
+    
+    bash "$MODULE_DIR/backup.sh"
+    
+    pause
+}
+
+# ===== 2. 恢复快照 =====
+restore_snapshot() {
+    show_header
+    log "${CYAN}恢复系统快照${NC}\n"
+    
+    if [[ ! -f "$MODULE_DIR/restore.sh" ]]; then
+        log "${RED}错误: 恢复模块不存在${NC}"
+        pause
+        return
+    fi
+    
+    bash "$MODULE_DIR/restore.sh"
+    
+    pause
+}
+
+# ===== 3. 配置管理 =====
+manage_config() {
+    while true; do
+        show_header
+        log "${CYAN}配置管理${NC}\n"
+        
+        echo -e "${YELLOW}配置选项${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${GREEN}1)${NC} 修改远程服务器配置"
+        echo -e "  ${GREEN}2)${NC} 修改 Telegram 配置"
+        echo -e "  ${GREEN}3)${NC} 修改保留策略"
+        echo -e "  ${GREEN}4)${NC} 查看当前配置"
+        echo -e "  ${GREEN}5)${NC} 编辑配置文件"
+        echo -e "  ${GREEN}6)${NC} 重启服务"
+        echo -e "  ${GREEN}7)${NC} 测试 Telegram 连接"
+        echo -e "  ${RED}0)${NC} 返回主菜单"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        
+        read -p "请选择 [0-7]: " config_choice
+        
+        case "$config_choice" in
+            1) configure_remote ;;
+            2) configure_telegram ;;
+            3) configure_retention ;;
+            4) view_config ;;
+            5) edit_config_file ;;
+            6) restart_services ;;
+            7) test_telegram ;;
+            0) return ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+configure_remote() {
+    show_header
+    log "${CYAN}配置远程服务器${NC}\n"
+    
+    echo "当前配置:"
+    source "$CONFIG_FILE" 2>/dev/null || true
+    echo "  远程备份: ${REMOTE_ENABLED:-false}"
+    echo "  服务器: ${REMOTE_HOST:-未配置}"
+    echo "  用户: ${REMOTE_USER:-root}"
+    echo "  端口: ${REMOTE_PORT:-22}"
+    echo ""
+    
+    read -p "是否启用远程备份? [y/N]: " enable_remote
+    
+    if [[ "$enable_remote" =~ ^[Yy]$ ]]; then
+        read -p "远程服务器地址: " remote_host
+        read -p "SSH 用户 [root]: " remote_user
+        remote_user="${remote_user:-root}"
+        read -p "SSH 端口 [22]: " remote_port
+        remote_port="${remote_port:-22}"
+        read -p "远程路径 [/backups]: " remote_path
+        remote_path="${remote_path:-/backups}"
+        
+        # 更新配置
+        sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"true\"|" "$CONFIG_FILE"
+        sed -i "s|^REMOTE_HOST=.*|REMOTE_HOST=\"$remote_host\"|" "$CONFIG_FILE"
+        sed -i "s|^REMOTE_USER=.*|REMOTE_USER=\"$remote_user\"|" "$CONFIG_FILE"
+        sed -i "s|^REMOTE_PORT=.*|REMOTE_PORT=\"$remote_port\"|" "$CONFIG_FILE"
+        sed -i "s|^REMOTE_PATH=.*|REMOTE_PATH=\"$remote_path\"|" "$CONFIG_FILE"
+        
+        log "${GREEN}✓ 远程服务器配置已保存${NC}"
+        
+        # 生成SSH密钥
+        if [[ ! -f /root/.ssh/id_ed25519 ]]; then
+            echo ""
+            log "${YELLOW}生成 SSH 密钥...${NC}"
+            ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N "" -q
+            log "${GREEN}✓ SSH 密钥已生成${NC}"
+        fi
+        
+        echo ""
+        log "${YELLOW}请将以下公钥添加到远程服务器:${NC}"
+        echo ""
+        cat /root/.ssh/id_ed25519.pub
+        echo ""
+        log "${CYAN}在远程服务器执行:${NC}"
+        echo "  mkdir -p ~/.ssh"
+        echo "  echo '$(cat /root/.ssh/id_ed25519.pub)' >> ~/.ssh/authorized_keys"
+        echo "  chmod 700 ~/.ssh"
+        echo "  chmod 600 ~/.ssh/authorized_keys"
+        
+    else
+        sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"false\"|" "$CONFIG_FILE"
+        log "${GREEN}✓ 远程备份已禁用${NC}"
+    fi
+    
+    pause
+}
+
+configure_telegram() {
+    show_header
+    log "${CYAN}配置 Telegram Bot${NC}\n"
+    
+    echo "当前配置:"
+    source "$CONFIG_FILE" 2>/dev/null || true
+    echo "  Telegram: ${TELEGRAM_ENABLED:-false}"
+    echo "  Bot Token: ${TELEGRAM_BOT_TOKEN:0:20}..."
+    echo "  Chat ID: ${TELEGRAM_CHAT_ID}"
+    echo ""
+    
+    read -p "是否启用 Telegram 通知? [y/N]: " enable_tg
+    
+    if [[ "$enable_tg" =~ ^[Yy]$ ]]; then
+        echo ""
+        log "${YELLOW}获取 Bot Token:${NC}"
+        echo "  1. 在 Telegram 搜索 @BotFather"
+        echo "  2. 发送 /newbot 创建新 Bot"
+        echo "  3. 获取 Bot Token"
+        echo ""
+        
+        read -p "输入 Bot Token: " bot_token
+        
+        echo ""
+        log "${YELLOW}获取 Chat ID:${NC}"
+        echo "  1. 向你的 Bot 发送任意消息"
+        echo "  2. 访问: https://api.telegram.org/bot${bot_token}/getUpdates"
+        echo "  3. 找到 \"chat\":{\"id\":数字}"
+        echo ""
+        
+        read -p "输入 Chat ID: " chat_id
+        
+        # 更新配置
+        sed -i "s|^TELEGRAM_ENABLED=.*|TELEGRAM_ENABLED=\"true\"|" "$CONFIG_FILE"
+        sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=\"$bot_token\"|" "$CONFIG_FILE"
+        sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=\"$chat_id\"|" "$CONFIG_FILE"
+        
+        log "${GREEN}✓ Telegram 配置已保存${NC}"
+        
+    else
+        sed -i "s|^TELEGRAM_ENABLED=.*|TELEGRAM_ENABLED=\"false\"|" "$CONFIG_FILE"
+        log "${GREEN}✓ Telegram 通知已禁用${NC}"
+    fi
+    
+    pause
+}
+
+configure_retention() {
+    show_header
+    log "${CYAN}配置保留策略${NC}\n"
+    
+    source "$CONFIG_FILE" 2>/dev/null || true
+    
+    echo "当前配置:"
+    echo "  本地保留: ${LOCAL_KEEP_COUNT:-5} 个"
+    echo "  远程保留: ${REMOTE_KEEP_DAYS:-30} 天"
+    echo ""
+    
+    read -p "本地保留快照数量 [5]: " local_keep
+    local_keep="${local_keep:-5}"
+    
+    read -p "远程保留天数 [30]: " remote_keep
+    remote_keep="${remote_keep:-30}"
+    
+    sed -i "s|^LOCAL_KEEP_COUNT=.*|LOCAL_KEEP_COUNT=\"$local_keep\"|" "$CONFIG_FILE"
+    sed -i "s|^REMOTE_KEEP_DAYS=.*|REMOTE_KEEP_DAYS=\"$remote_keep\"|" "$CONFIG_FILE"
+    
+    log "${GREEN}✓ 保留策略已更新${NC}"
+    pause
+}
+
+view_config() {
+    show_header
+    log "${CYAN}当前配置${NC}\n"
+    
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cat "$CONFIG_FILE"
+    else
+        log "${RED}配置文件不存在${NC}"
+    fi
+    
+    pause
+}
+
+edit_config_file() {
+    show_header
+    log "${CYAN}编辑配置文件${NC}\n"
+    
+    if command -v nano &>/dev/null; then
+        nano "$CONFIG_FILE"
+    elif command -v vi &>/dev/null; then
+        vi "$CONFIG_FILE"
+    else
+        log "${RED}未找到文本编辑器${NC}"
+    fi
+    
+    pause
+}
+
+restart_services() {
+    show_header
+    log "${CYAN}重启服务${NC}\n"
+    
+    log "重启 Telegram Bot..."
+    systemctl restart snapsync-bot 2>/dev/null || log "${YELLOW}⚠ Bot 服务未运行${NC}"
+    
+    log "重启定时器..."
+    systemctl restart snapsync-backup.timer 2>/dev/null || log "${YELLOW}⚠ 定时器未启用${NC}"
+    
+    log "${GREEN}✓ 服务已重启${NC}"
+    pause
+}
+
+test_telegram() {
+    show_header
+    log "${CYAN}测试 Telegram 连接${NC}\n"
+    
+    if command -v telegram-test &>/dev/null; then
+        telegram-test
+    else
+        log "${RED}未找到诊断工具${NC}"
+    fi
+    
+    pause
+}
+
+# ===== 4. 查看快照列表 =====
+list_snapshots() {
+    show_header
+    log "${CYAN}快照列表${NC}\n"
+    
+    source "$CONFIG_FILE" 2>/dev/null || true
+    local backup_dir="${BACKUP_DIR:-/backups}"
+    local snapshot_dir="$backup_dir/system_snapshots"
+    
+    if [[ ! -d "$snapshot_dir" ]]; then
+        log "${YELLOW}快照目录不存在${NC}"
+        pause
+        return
+    fi
+    
+    local snapshots=()
+    while IFS= read -r -d '' file; do
+        if [[ "$file" != *.sha256 ]]; then
+            snapshots+=("$file")
+        fi
+    done < <(find "$snapshot_dir" -maxdepth 1 -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    
+    if [[ ${#snapshots[@]} -eq 0 ]]; then
+        log "${YELLOW}未找到快照${NC}"
+        pause
+        return
+    fi
+    
+    log "${GREEN}找到 ${#snapshots[@]} 个快照:${NC}\n"
+    
+    local idx=1
+    for file in "${snapshots[@]}"; do
+        local name=$(basename "$file")
+        local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+        local size_human=""
+        
+        if (( size >= 1073741824 )); then
+            size_human="$(awk "BEGIN {printf \"%.2f\", $size/1073741824}")GB"
+        elif (( size >= 1048576 )); then
+            size_human="$(awk "BEGIN {printf \"%.2f\", $size/1048576}")MB"
+        else
+            size_human="$(awk "BEGIN {printf \"%.2f\", $size/1024}")KB"
+        fi
+        
+        local date=$(date -r "$file" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "未知")
+        
+        echo -e "${CYAN}${idx})${NC} ${name}"
+        echo "   大小: ${size_human}"
+        echo "   时间: ${date}"
+        
+        if [[ -f "${file}.sha256" ]]; then
+            echo "   状态: ✓ 已校验"
+        else
+            echo "   状态: ⚠ 无校验"
+        fi
+        echo ""
+        
+        ((idx++))
+    done
+    
+    pause
+}
+
+# ===== 5. Bot 管理 =====
+manage_telegram_bot() {
+    while true; do
+        show_header
+        log "${CYAN}Telegram Bot 管理${NC}\n"
+        
+        local bot_status=$(systemctl is-active snapsync-bot 2>/dev/null || echo "inactive")
+        local status_color="${RED}"
+        [[ "$bot_status" == "active" ]] && status_color="${GREEN}"
+        
+        echo -e "Bot 状态: ${status_color}${bot_status}${NC}"
+        echo ""
+        
+        echo -e "${YELLOW}Bot 管理${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${GREEN}1)${NC} 启动 Bot"
+        echo -e "  ${GREEN}2)${NC} 停止 Bot"
+        echo -e "  ${GREEN}3)${NC} 重启 Bot"
+        echo -e "  ${GREEN}4)${NC} 查看 Bot 状态"
+        echo -e "  ${GREEN}5)${NC} 查看 Bot 日志"
+        echo -e "  ${GREEN}6)${NC} 启用开机自启"
+        echo -e "  ${GREEN}7)${NC} 禁用开机自启"
+        echo -e "  ${RED}0)${NC} 返回主菜单"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        
+        read -p "请选择 [0-7]: " bot_choice
+        
+        case "$bot_choice" in
+            1)
+                systemctl start snapsync-bot
+                log "${GREEN}✓ Bot 已启动${NC}"
+                sleep 2
+                ;;
+            2)
+                systemctl stop snapsync-bot
+                log "${GREEN}✓ Bot 已停止${NC}"
+                sleep 2
+                ;;
+            3)
+                systemctl restart snapsync-bot
+                log "${GREEN}✓ Bot 已重启${NC}"
+                sleep 2
+                ;;
+            4)
+                systemctl status snapsync-bot
+                pause
+                ;;
+            5)
+                tail -50 /var/log/snapsync/bot.log
+                pause
+                ;;
+            6)
+                systemctl enable snapsync-bot
+                log "${GREEN}✓ 已启用开机自启${NC}"
+                sleep 2
+                ;;
+            7)
+                systemctl disable snapsync-bot
+                log "${GREEN}✓ 已禁用开机自启${NC}"
+                sleep 2
+                ;;
+            0) return ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ===== 6. 清理快照 =====
+clean_snapshots() {
+    show_header
+    log "${CYAN}清理旧快照${NC}\n"
+    
+    source "$CONFIG_FILE" 2>/dev/null || true
+    local backup_dir="${BACKUP_DIR:-/backups}"
+    local snapshot_dir="$backup_dir/system_snapshots"
+    local keep_count="${LOCAL_KEEP_COUNT:-5}"
+    
+    local snapshots=()
+    while IFS= read -r -d '' file; do
+        if [[ "$file" != *.sha256 ]]; then
+            snapshots+=("$file")
+        fi
+    done < <(find "$snapshot_dir" -maxdepth 1 -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
+    
+    local total=${#snapshots[@]}
+    
+    log "当前快照: ${total} 个"
+    log "保留策略: 最新 ${keep_count} 个"
+    echo ""
+    
+    if (( total <= keep_count )); then
+        log "${GREEN}快照数量未超限，无需清理${NC}"
+        pause
+        return
+    fi
+    
+    local to_delete=$((total - keep_count))
+    log "${YELLOW}将删除 ${to_delete} 个旧快照${NC}"
+    echo ""
+    
+    read -p "确认删除? [y/N]: " confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log "已取消"
+        pause
+        return
+    fi
+    
+    local deleted=0
+    for ((i=keep_count; i<total; i++)); do
+        local file="${snapshots[$i]}"
+        log "删除: $(basename "$file")"
+        rm -f "$file" "${file}.sha256"
+        ((deleted++))
+    done
+    
+    log "${GREEN}✓ 已删除 ${deleted} 个快照${NC}"
+    pause
+}
+
+# ===== 7. 查看日志 =====
+view_logs() {
+    while true; do
+        show_header
+        log "${CYAN}查看日志${NC}\n"
+        
+        echo -e "${YELLOW}日志选项${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${GREEN}1)${NC} 备份日志"
+        echo -e "  ${GREEN}2)${NC} 恢复日志"
+        echo -e "  ${GREEN}3)${NC} Bot 日志"
+        echo -e "  ${GREEN}4)${NC} 主日志"
+        echo -e "  ${GREEN}5)${NC} 实时监控备份日志"
+        echo -e "  ${RED}0)${NC} 返回主菜单"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        
+        read -p "请选择 [0-5]: " log_choice
+        
+        case "$log_choice" in
+            1) tail -100 "$LOG_DIR/backup.log"; pause ;;
+            2) tail -100 "$LOG_DIR/restore.log"; pause ;;
+            3) tail -100 "$LOG_DIR/bot.log"; pause ;;
+            4) tail -100 "$LOG_DIR/main.log"; pause ;;
+            5) tail -f "$LOG_DIR/backup.log" ;;
+            0) return ;;
+            *) log "${RED}无效选择${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ===== 8. 系统信息 =====
+show_system_info() {
+    show_header
+    log "${CYAN}系统信息${NC}\n"
+    
+    echo -e "${YELLOW}主机信息:${NC}"
+    echo "  主机名: $(hostname)"
+    echo "  系统: $(uname -s) $(uname -r)"
+    echo "  运行时间: $(uptime -p 2>/dev/null || echo "未知")"
+    echo ""
+    
+    echo -e "${YELLOW}磁盘信息:${NC}"
+    df -h | grep -E '^/dev/|Filesystem'
+    echo ""
+    
+    echo -e "${YELLOW}内存信息:${NC}"
+    free -h
+    echo ""
+    
+    source "$CONFIG_FILE" 2>/dev/null || true
+    
+    echo -e "${YELLOW}SnapSync 信息:${NC}"
+    echo "  版本: v3.0"
+    echo "  备份目录: ${BACKUP_DIR:-/backups}"
+    echo "  Telegram: ${TELEGRAM_ENABLED:-false}"
+    echo "  远程备份: ${REMOTE_ENABLED:-false}"
+    echo ""
+    
+    pause
+}
+
+# ===== 9. 完全卸载 =====
+uninstall_snapsync() {
+    show_header
+    log "${RED}完全卸载 SnapSync${NC}\n"
+    
+    log "${YELLOW}警告: 此操作将删除所有程序文件${NC}"
+    echo ""
+    
+    read -p "确认卸载? [y/N]: " confirm1
+    
+    if [[ ! "$confirm1" =~ ^[Yy]$ ]]; then
+        log "已取消"
+        pause
+        return
+    fi
+    
+    log "${RED}再次确认: 输入 'UNINSTALL' 继续${NC}"
+    read -p "> " confirm2
+    
+    if [[ "$confirm2" != "UNINSTALL" ]]; then
+        log "已取消"
+        pause
+        return
+    fi
+    
+    log "\n${CYAN}开始卸载...${NC}\n"
+    
+    # 停止服务
+    log "停止服务..."
+    systemctl stop snapsync-bot 2>/dev/null || true
+    systemctl stop snapsync-backup.timer 2>/dev/null || true
+    systemctl disable snapsync-bot 2>/dev/null || true
+    systemctl disable snapsync-backup.timer 2>/dev/null || true
+    
+    # 删除服务文件
+    log "删除服务文件..."
+    rm -f /etc/systemd/system/snapsync-bot.service
+    rm -f /etc/systemd/system/snapsync-backup.service
+    rm -f /etc/systemd/system/snapsync-backup.timer
+    systemctl daemon-reload
+    
+    # 删除命令
+    log "删除命令..."
+    rm -f /usr/local/bin/snapsync
+    rm -f /usr/local/bin/snapsync-backup
+    rm -f /usr/local/bin/snapsync-restore
+    rm -f /usr/local/bin/telegram-test
+    
+    # 删除程序
+    log "删除程序文件..."
+    rm -rf "$INSTALL_DIR"
+    
+    # 询问是否删除配置
+    echo ""
+    read -p "是否删除配置文件? [y/N]: " del_config
+    if [[ "$del_config" =~ ^[Yy]$ ]]; then
+        rm -rf "$CONFIG_DIR"
+        log "${GREEN}✓ 配置已删除${NC}"
+    else
+        log "${YELLOW}✓ 配置已保留${NC}"
+    fi
+    
+    # 询问是否删除日志
+    echo ""
+    read -p "是否删除日志文件? [y/N]: " del_logs
+    if [[ "$del_logs" =~ ^[Yy]$ ]]; then
+        rm -rf "$LOG_DIR"
+        log "${GREEN}✓ 日志已删除${NC}"
+    else
+        log "${YELLOW}✓ 日志已保留${NC}"
+    fi
+    
+    # 询问是否删除备份
+    echo ""
+    read -p "是否删除所有备份? [y/N]: " del_backups
+    if [[ "$del_backups" =~ ^[Yy]$ ]]; then
+        source "$CONFIG_FILE" 2>/dev/null || true
+        local backup_dir="${BACKUP_DIR:-/backups}"
+        rm -rf "$backup_dir/system_snapshots"
+        log "${GREEN}✓ 备份已删除${NC}"
+    else
+        log "${YELLOW}✓ 备份已保留${NC}"
+    fi
+    
+    echo ""
+    log "${GREEN}✓✓✓ 卸载完成！✓✓✓${NC}"
+    echo ""
+    log "SnapSync 已从系统中移除"
+    
+    pause
+    exit 0
+}
 
 # ===== 主程序 =====
 main() {
@@ -119,6 +703,8 @@ BACKUP_DIR="/backups"
 TELEGRAM_ENABLED="false"
 REMOTE_ENABLED="false"
 LOCAL_KEEP_COUNT="5"
+COMPRESSION_LEVEL="6"
+PARALLEL_THREADS="auto"
 EOF
         chmod 600 "$CONFIG_FILE"
     fi
