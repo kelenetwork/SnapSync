@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# SnapSync v3.0 安装脚本 - 修复版
+# SnapSync v3.0 安装脚本 - 完整修复版
 # 修复：
-# 1. 依赖包名适配不同系统
-# 2. 更智能的包安装逻辑
-# 3. 跳过失败的可选包
+# 1. 处理重复安装
+# 2. 依赖包名适配
+# 3. 更智能的错误处理
 
 set -euo pipefail
 
@@ -38,7 +38,7 @@ log() {
     echo -e "$(date '+%F %T') $*" | tee -a "$LOG_DIR/install.log"
 }
 
-# ===== 检测系统并适配包名 =====
+# ===== 检测系统 =====
 detect_system() {
     log "${CYAN}检测系统信息...${NC}"
     
@@ -73,25 +73,14 @@ detect_system() {
     log "${GREEN}包管理器: $PKG_MANAGER${NC}\n"
 }
 
-# ===== 安装单个包（修复版）=====
+# ===== 安装单个包 =====
 install_package() {
     local pkg="$1"
     local is_optional="${2:-no}"
     
-    # 检查是否已安装
+    # 检查命令是否存在
     if command -v "$pkg" &>/dev/null; then
         log "  ${GREEN}✓ $pkg${NC} (已存在)"
-        return 0
-    fi
-    
-    # 尝试从已安装包中查找
-    if dpkg -l 2>/dev/null | grep -q "^ii  $pkg "; then
-        log "  ${GREEN}✓ $pkg${NC} (已安装)"
-        return 0
-    fi
-    
-    if rpm -q "$pkg" &>/dev/null 2>&1; then
-        log "  ${GREEN}✓ $pkg${NC} (已安装)"
         return 0
     fi
     
@@ -111,7 +100,7 @@ install_package() {
     fi
 }
 
-# ===== 安装依赖（修复版）=====
+# ===== 安装依赖 =====
 install_dependencies() {
     log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     log "${CYAN}安装系统依赖${NC}"
@@ -120,61 +109,46 @@ install_dependencies() {
     log "${YELLOW}更新包列表...${NC}"
     eval "$PKG_UPDATE" >/dev/null 2>&1 || log "${YELLOW}⚠ 更新失败，继续${NC}"
     
-    # 基础工具（必须安装）
+    # 基础工具
     log "\n${YELLOW}安装基础工具...${NC}"
     
-    # 根据系统类型定义包名映射
     declare -A pkg_map
-    
     if [[ "$PKG_MANAGER" == "apt-get" ]]; then
-        # Debian/Ubuntu 系统
         pkg_map=(
-            ["ssh"]="openssh-client"
+            ["openssh-client"]="openssh-client"
             ["tar"]="tar"
             ["gzip"]="gzip"
             ["curl"]="curl"
             ["rsync"]="rsync"
             ["jq"]="jq"
             ["bc"]="bc"
-            ["find"]="findutils"
+            ["findutils"]="findutils"
         )
     else
-        # CentOS/RHEL 系统
         pkg_map=(
-            ["ssh"]="openssh-clients"
+            ["openssh-clients"]="openssh-clients"
             ["tar"]="tar"
             ["gzip"]="gzip"
             ["curl"]="curl"
             ["rsync"]="rsync"
             ["jq"]="jq"
             ["bc"]="bc"
-            ["find"]="findutils"
+            ["findutils"]="findutils"
         )
     fi
     
     # 安装必需包
-    for cmd in ssh tar gzip curl rsync jq bc find; do
-        if ! command -v "$cmd" &>/dev/null; then
-            local pkg_name="${pkg_map[$cmd]:-$cmd}"
-            install_package "$pkg_name" "no" || {
-                log "${RED}关键包 $pkg_name 安装失败${NC}"
-                # 尝试备选包名
-                if [[ "$cmd" == "ssh" ]]; then
-                    install_package "openssh" "no" || true
-                fi
-            }
-        else
-            log "  ${GREEN}✓ $cmd${NC} (已存在)"
-        fi
+    for pkg_name in "${pkg_map[@]}"; do
+        install_package "$pkg_name" "no" || true
     done
     
     # 可选工具
     log "\n${YELLOW}安装增强工具...${NC}"
     
-    local optional_pkgs="pigz acl attr pv bzip2 xz-utils"
-    
-    # CentOS/RHEL 使用 xz 而非 xz-utils
-    if [[ "$PKG_MANAGER" != "apt-get" ]]; then
+    local optional_pkgs=""
+    if [[ "$PKG_MANAGER" == "apt-get" ]]; then
+        optional_pkgs="pigz acl attr pv bzip2 xz-utils"
+    else
         optional_pkgs="pigz acl attr pv bzip2 xz"
     fi
     
@@ -185,6 +159,226 @@ install_dependencies() {
     log "\n${GREEN}✓ 依赖安装完成${NC}\n"
 }
 
-# [保留原有的其他函数...]
+# ===== 安装文件 =====
+install_files() {
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}安装程序文件${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    # 创建目录
+    mkdir -p "$INSTALL_DIR"/{modules,bot}
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$LOG_DIR"
+    mkdir -p "$DEFAULT_BACKUP_DIR/system_snapshots"
+    
+    # 复制主脚本
+    if [[ -f "$SCRIPT_DIR/snapsync.sh" ]]; then
+        cp "$SCRIPT_DIR/snapsync.sh" "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/snapsync.sh"
+        log "${GREEN}✓ 主脚本${NC}"
+    else
+        log "${RED}✗ 未找到 snapsync.sh${NC}"
+    fi
+    
+    # 复制模块
+    for module in backup.sh restore.sh config.sh; do
+        if [[ -f "$SCRIPT_DIR/$module" ]]; then
+            cp "$SCRIPT_DIR/$module" "$INSTALL_DIR/modules/"
+            chmod +x "$INSTALL_DIR/modules/$module"
+            log "${GREEN}✓ $module${NC}"
+        else
+            log "${YELLOW}⚠ 未找到 $module${NC}"
+        fi
+    done
+    
+    # 复制Bot脚本
+    if [[ -f "$SCRIPT_DIR/telegram_bot.sh" ]]; then
+        cp "$SCRIPT_DIR/telegram_bot.sh" "$INSTALL_DIR/bot/"
+        chmod +x "$INSTALL_DIR/bot/telegram_bot.sh"
+        log "${GREEN}✓ Bot脚本${NC}"
+    else
+        log "${YELLOW}⚠ 未找到 telegram_bot.sh${NC}"
+    fi
+    
+    # 复制诊断工具
+    if [[ -f "$SCRIPT_DIR/telegram-test.sh" ]]; then
+        # 先删除可能存在的旧链接
+        rm -f /usr/local/bin/telegram-test
+        cp "$SCRIPT_DIR/telegram-test.sh" "/usr/local/bin/telegram-test"
+        chmod +x "/usr/local/bin/telegram-test"
+        log "${GREEN}✓ 诊断工具${NC}"
+    else
+        log "${YELLOW}⚠ 未找到 telegram-test.sh${NC}"
+    fi
+    
+    log "\n${GREEN}✓ 文件安装完成${NC}\n"
+}
 
-# 这里只展示关键修复，其他函数保持不变
+# ===== 创建配置 =====
+create_config() {
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}创建配置文件${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    if [[ -f "$CONFIG_DIR/config.conf" ]]; then
+        log "${YELLOW}配置文件已存在，保留现有配置${NC}"
+        return
+    fi
+    
+    cat > "$CONFIG_DIR/config.conf" << 'EOF'
+#!/bin/bash
+
+# SnapSync v3.0 配置文件
+
+# ===== Telegram 配置 =====
+TELEGRAM_ENABLED="false"
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# ===== 远程备份配置 =====
+REMOTE_ENABLED="false"
+REMOTE_HOST=""
+REMOTE_USER="root"
+REMOTE_PORT="22"
+REMOTE_PATH="/backups"
+REMOTE_KEEP_DAYS="30"
+
+# ===== 本地备份配置 =====
+BACKUP_DIR="/backups"
+COMPRESSION_LEVEL="6"
+PARALLEL_THREADS="auto"
+LOCAL_KEEP_COUNT="5"
+
+# ===== 定时任务配置 =====
+AUTO_BACKUP_ENABLED="false"
+BACKUP_INTERVAL_DAYS="7"
+BACKUP_TIME="03:00"
+
+# ===== 高级配置 =====
+ENABLE_ACL="true"
+ENABLE_XATTR="true"
+ENABLE_VERIFICATION="true"
+DISK_THRESHOLD="90"
+HOSTNAME="$(hostname)"
+EOF
+    
+    chmod 600 "$CONFIG_DIR/config.conf"
+    log "${GREEN}✓ 配置文件已创建${NC}\n"
+}
+
+# ===== 创建系统服务 =====
+create_services() {
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}创建系统服务${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    # Bot服务
+    cat > /etc/systemd/system/snapsync-bot.service << EOF
+[Unit]
+Description=SnapSync Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR/bot
+ExecStart=/bin/bash $INSTALL_DIR/bot/telegram_bot.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # 备份服务
+    cat > /etc/systemd/system/snapsync-backup.service << EOF
+[Unit]
+Description=SnapSync Backup Service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $INSTALL_DIR/modules/backup.sh
+EOF
+    
+    # 定时器
+    cat > /etc/systemd/system/snapsync-backup.timer << EOF
+[Unit]
+Description=SnapSync Backup Timer
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    
+    systemctl daemon-reload
+    log "${GREEN}✓ 系统服务已创建${NC}\n"
+}
+
+# ===== 创建命令快捷方式 =====
+create_shortcuts() {
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}创建命令快捷方式${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    ln -sf "$INSTALL_DIR/snapsync.sh" /usr/local/bin/snapsync
+    ln -sf "$INSTALL_DIR/modules/backup.sh" /usr/local/bin/snapsync-backup
+    ln -sf "$INSTALL_DIR/modules/restore.sh" /usr/local/bin/snapsync-restore
+    
+    log "${GREEN}✓ snapsync${NC}"
+    log "${GREEN}✓ snapsync-backup${NC}"
+    log "${GREEN}✓ snapsync-restore${NC}"
+    log "${GREEN}✓ telegram-test${NC}\n"
+}
+
+# ===== 完成安装 =====
+finish_installation() {
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${GREEN}✓✓✓ 安装完成！✓✓✓${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    
+    echo -e "${YELLOW}快速开始:${NC}"
+    echo -e "  1. 启动控制台: ${CYAN}sudo snapsync${NC}"
+    echo -e "  2. 创建快照:   ${CYAN}sudo snapsync-backup${NC}"
+    echo -e "  3. 恢复快照:   ${CYAN}sudo snapsync-restore${NC}"
+    echo -e "  4. 测试TG:     ${CYAN}sudo telegram-test${NC}"
+    echo ""
+    echo -e "${YELLOW}配置建议:${NC}"
+    echo -e "  • 运行 ${CYAN}sudo snapsync${NC} 进入配置向导"
+    echo -e "  • 配置 Telegram Bot（可选）"
+    echo -e "  • 配置远程备份服务器（可选）"
+    echo ""
+}
+
+# ===== 主程序 =====
+main() {
+    clear
+    echo ""
+    log "${BLUE}╔════════════════════════════════════════════╗${NC}"
+    log "${BLUE}║${CYAN}       SnapSync v3.0 安装程序              ${BLUE}║${NC}"
+    log "${BLUE}╚════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    # 检查是否已安装
+    if [[ -d "$INSTALL_DIR" ]]; then
+        log "${YELLOW}检测到已安装 SnapSync${NC}"
+        read -p "是否重新安装（会保留配置）? [y/N]: " reinstall
+        if [[ ! "$reinstall" =~ ^[Yy]$ ]]; then
+            log "${GREEN}已取消${NC}"
+            exit 0
+        fi
+    fi
+    
+    detect_system
+    install_dependencies
+    install_files
+    create_config
+    create_services
+    create_shortcuts
+    finish_installation
+}
+
+main "$@"
