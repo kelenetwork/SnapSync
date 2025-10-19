@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# SnapSync v3.0 - Telegram Bot（完整重写版）
-# 功能：系统状态、快照管理、配置管理、日志查看、连接测试
+# SnapSync v3.0 - Telegram Bot（调试增强版）
+# 添加详细日志输出，方便排查问题
 
 set -euo pipefail
 
@@ -30,15 +30,32 @@ log() {
     echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
 }
 
+log_debug() {
+    echo "[$(date '+%H:%M:%S')] [DEBUG] $*" >> "$LOG_FILE"
+}
+
 # ===== API 调用函数 =====
 call_api() {
-    curl -sS -m 15 -X POST "${API}/$1" "${@:2}" 2>/dev/null || echo '{"ok":false}'
+    local endpoint="$1"
+    shift
+    local response=$(curl -sS -m 15 -X POST "${API}/${endpoint}" "$@" 2>&1)
+    local exit_code=$?
+    
+    if [[ $exit_code -ne 0 ]]; then
+        log_debug "API调用失败: $endpoint (退出码: $exit_code)"
+        echo '{"ok":false}'
+        return 1
+    fi
+    
+    echo "$response"
 }
 
 send_message() {
     local chat_id="$1"
     local text="$2"
     local keyboard="${3:-}"
+    
+    log_debug "发送消息到 $chat_id: ${text:0:50}..."
     
     call_api sendMessage \
         -d "chat_id=$chat_id" \
@@ -54,6 +71,8 @@ edit_message() {
     local message_id="$2"
     local text="$3"
     local keyboard="${4:-}"
+    
+    log_debug "编辑消息: $chat_id/$message_id"
     
     call_api editMessageText \
         -d "chat_id=$chat_id" \
@@ -86,11 +105,11 @@ format_bytes() {
 }
 
 get_cpu_usage() {
-    top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1
+    top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 || echo "N/A"
 }
 
 get_mem_usage() {
-    free | awk '/Mem:/ {printf "%.1f", $3/$2*100}'
+    free | awk '/Mem:/ {printf "%.1f", $3/$2*100}' || echo "N/A"
 }
 
 get_backup_dir_size() {
@@ -877,7 +896,7 @@ cb_test_telegram() {
     
     # 测试 getMe
     local result=""
-    local api_test=$(curl -sS -m 10 "${API}/getMe")
+    local api_test=$(curl -sS -m 10 "${API}/getMe" 2>&1)
     
     if echo "$api_test" | grep -q '"ok":true'; then
         local bot_username=$(echo "$api_test" | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
@@ -911,6 +930,8 @@ $result" "$(menu_back)"
 handle_text() {
     local chat_id="$1"
     local text="$2"
+    
+    log_debug "收到文本: $text from $chat_id"
     
     # 处理命令
     if [[ "$text" == "/start" ]]; then
@@ -1026,29 +1047,71 @@ route_callback() {
 # ===== 主循环 =====
 main() {
     log "========== Bot 启动: $HOST =========="
+    log_debug "API: ${API:0:50}..."
+    log_debug "备份目录: $BACKUP_DIR"
     
     # 初始化 offset
     if [[ ! -f "$OFFSET_FILE" ]]; then
-        log "[INIT] 初始化offset..."
-        local last=$(curl -sS "${API}/getUpdates" 2>/dev/null | grep -o '"update_id":[0-9]*' | tail -1 | cut -d: -f2)
+        log_debug "初始化 offset 文件"
+        local last=$(curl -sS -m 10 "${API}/getUpdates" 2>/dev/null | grep -o '"update_id":[0-9]*' | tail -1 | cut -d: -f2)
         echo $((${last:-0} + 1)) > "$OFFSET_FILE"
+        log_debug "Offset 初始化为: $(cat $OFFSET_FILE)"
+    else
+        log_debug "当前 offset: $(cat $OFFSET_FILE)"
     fi
     
+    log "主循环启动"
+    
     # 主循环
+    local loop_count=0
     while true; do
-        local offset=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
-        local response=$(curl -sS -m 30 "${API}/getUpdates?offset=$offset&timeout=25" 2>/dev/null)
+        ((loop_count++))
         
-        [[ -z "$response" ]] && sleep 1 && continue
-        echo "$response" | grep -q '"ok":true' || { sleep 1; continue; }
+        # 每100次循环记录一次
+        if (( loop_count % 100 == 0 )); then
+            log_debug "主循环运行中... (循环 $loop_count 次)"
+        fi
+        
+        local offset=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
+        
+        log_debug "调用 getUpdates (offset=$offset)"
+        local response=$(curl -sS -m 30 "${API}/getUpdates?offset=$offset&timeout=25" 2>&1)
+        local curl_exit=$?
+        
+        if [[ $curl_exit -ne 0 ]]; then
+            log_debug "curl 失败 (退出码: $curl_exit)"
+            sleep 3
+            continue
+        fi
+        
+        if [[ -z "$response" ]]; then
+            log_debug "响应为空"
+            sleep 1
+            continue
+        fi
+        
+        if ! echo "$response" | grep -q '"ok":true'; then
+            log_debug "API 返回错误: ${response:0:100}"
+            sleep 1
+            continue
+        fi
         
         # 提取所有 update_id
         local update_ids=$(echo "$response" | grep -o '"update_id":[0-9]*' | cut -d: -f2)
-        [[ -z "$update_ids" ]] && sleep 1 && continue
+        
+        if [[ -z "$update_ids" ]]; then
+            # 没有新消息
+            sleep 1
+            continue
+        fi
+        
+        log_debug "收到 $(echo "$update_ids" | wc -l) 个更新"
         
         # 处理每个更新
         while read -r uid; do
             [[ -z "$uid" ]] && continue
+            
+            log_debug "处理 update_id: $uid"
             
             # 提取当前更新的数据
             local update=$(echo "$response" | grep -A 100 "\"update_id\":$uid" | grep -B 100 "\"update_id\":" | head -n -1)
@@ -1058,7 +1121,10 @@ main() {
                 local cid=$(echo "$update" | grep -o '"chat":{"id":[0-9-]*' | grep -o '[0-9-]*$' | head -1)
                 local txt=$(echo "$update" | grep -o '"text":"[^"]*"' | head -1 | cut -d'"' -f4)
                 
-                [[ -n "$cid" && -n "$txt" ]] && handle_text "$cid" "$txt"
+                if [[ -n "$cid" && -n "$txt" ]]; then
+                    log_debug "文本消息: $cid -> $txt"
+                    handle_text "$cid" "$txt"
+                fi
             
             # 处理回调
             elif echo "$update" | grep -q '"callback_query"'; then
@@ -1067,7 +1133,12 @@ main() {
                 local cbid=$(echo "$update" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
                 local data=$(echo "$update" | grep -o '"data":"[^"]*"' | head -1 | cut -d'"' -f4)
                 
-                [[ -n "$cid" && -n "$mid" && -n "$cbid" && -n "$data" ]] && route_callback "$cid" "$mid" "$cbid" "$data"
+                if [[ -n "$cid" && -n "$mid" && -n "$cbid" && -n "$data" ]]; then
+                    log_debug "回调: $cid/$mid -> $data"
+                    route_callback "$cid" "$mid" "$cbid" "$data"
+                fi
+            else
+                log_debug "未知更新类型"
             fi
             
             # 更新 offset
@@ -1088,6 +1159,10 @@ if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
     log "[ERROR] TELEGRAM_CHAT_ID 未配置"
     exit 1
 fi
+
+log "配置检查通过"
+log "Bot Token: ${TELEGRAM_BOT_TOKEN:0:20}..."
+log "Chat ID: ${TELEGRAM_CHAT_ID}"
 
 # 启动
 main
