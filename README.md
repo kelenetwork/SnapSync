@@ -23,13 +23,11 @@
 ✅ **智能依赖检测** - 自动识别并安装所需依赖  
 ✅ **远程存储支持** - 可选上传至远程服务器  
 ✅ **Telegram Bot 控制** - 按钮式交互，远程管理快照  
-✅ **多VPS统一管理** - 一个Bot管理多台服务器  
 ✅ **完整卸载功能** - 彻底清理，无残留  
 ✅ **实时通知推送** - 每个关键步骤都有通知  
 
 ### ⚡ v3.0 新特性
 - 🎮 **按钮式Bot交互** - 告别命令式，使用按钮操作
-- 🖥️ **多VPS管理** - 每条消息自动显示主机名
 - 🔔 **完整通知系统** - 修复TG通知，支持所有场景
 - 🗑️ **完全卸载** - 新增卸载功能，可选保留备份
 - 🔧 **完整配置管理** - 所有配置项可视化修改
@@ -168,8 +166,9 @@ SnapSync v3.0 的 Telegram Bot 采用**完全按钮式交互**：
 - `[📋 快照列表]` - 列出所有快照
 - `[🔄 创建快照]` - 创建新快照（带确认）
 - `[🗑️ 删除快照]` - 删除指定快照（带确认）
-- `[⚙️ 配置信息]` - 查看当前配置
-- `[❓ 帮助]` - 查看使用帮助
+- `[⚙️ 配置管理]` - 查看和修改配置
+- `[📝 查看日志]` - 查看各类日志
+- `[🔌 测试连接]` - 测试远程和TG连接
 
 **🔔 实时通知**
 - 📸 快照创建开始/完成通知
@@ -177,32 +176,14 @@ SnapSync v3.0 的 Telegram Bot 采用**完全按钮式交互**：
 - ❌ 错误和警告提醒
 - 💾 磁盘空间警告
 
-### 多VPS管理
-
-**一个Bot管理多台服务器：**
-
+**📌 通知格式**
+每条通知都会显示主机名，方便识别：
 ```
-🖥️ vps-tokyo
+🖥️ server-01
 ━━━━━━━━━━━━━━━━━━━━━━━
 ✅ 备份完成
 📦 2.5GB | ⏱️ 245秒
-
-🖥️ vps-singapore  
-━━━━━━━━━━━━━━━━━━━━━━━
-✅ 备份完成
-📦 1.8GB | ⏱️ 198秒
-
-🖥️ vps-usa
-━━━━━━━━━━━━━━━━━━━━━━━
-✅ 备份完成
-📦 3.2GB | ⏱️ 312秒
 ```
-
-**特点：**
-- 每条消息自动显示主机名
-- 所有VPS使用相同的Bot Token和Chat ID
-- 消息清晰区分，不会混淆
-- 按钮操作只影响对应的VPS
 
 ### Bot 设置
 
@@ -252,7 +233,7 @@ sudo telegram-test
 # 方式2: 通过控制台
 sudo snapsync
 # 选择: 3) 配置管理
-# 选择: 8) 测试 Telegram 连接
+# 选择: 7) 测试 Telegram 连接
 ```
 
 ### Bot 使用示例
@@ -264,7 +245,7 @@ Bot: [显示主菜单按钮]
 
 你: 点击 [📊 系统状态]
 Bot: 
-🖥️ vps-tokyo
+🖥️ server-01
 ━━━━━━━━━━━━━━━━━━━━━━━
 📊 系统状态
 
@@ -303,16 +284,18 @@ Bot: ✅ 快照创建成功
 Bot: 
 选择要删除的快照:
 
-[1. snapshot_xxx]
-[2. snapshot_yyy]
-[3. snapshot_zzz]
+[1. 01-15 03:00]
+[2. 01-08 03:00]
+[3. 01-01 03:00]
 [🔙 返回]
 
-你: 点击 [2. snapshot_yyy]
+你: 点击 [2. 01-08 03:00]
 Bot:
 🗑️ 确认删除
 
-快照: snapshot_yyy
+快照: system_snapshot_20250108030000.tar.gz
+大小: 2.5GB
+时间: 2025-01-08 03:00
 
 ⚠️ 此操作不可撤销！
 
@@ -321,6 +304,71 @@ Bot:
 你: 点击 [✅ 确认删除]
 Bot: ✅ 删除成功
 ```
+
+**配置管理:**
+```
+你: 点击 [⚙️ 配置管理]
+Bot:
+⚙️ 配置管理
+
+📦 本地保留: 5 个
+🌐 远程保留: 30 天
+⏰ 备份间隔: 7 天
+🗜️ 压缩级别: 6
+
+[📦 快照保留策略]
+[⏰ 备份计划]
+[🗜️ 压缩级别]
+[🌐 远程备份]
+[🔙 返回]
+```
+
+### 管理多台服务器
+
+**方案 1: 使用不同的 Bot（推荐）**
+
+每台服务器创建独立的 Bot：
+```bash
+# 服务器 A
+Bot: @ServerA_SnapSync_Bot
+Chat ID: 你的Chat ID
+
+# 服务器 B  
+Bot: @ServerB_SnapSync_Bot
+Chat ID: 你的Chat ID
+```
+
+优点：
+- ✅ 消息完全隔离，不会混淆
+- ✅ 可独立管理每台服务器
+- ✅ 按钮操作准确对应服务器
+
+**方案 2: 使用相同 Bot 不同 Chat**
+
+一个 Bot，但使用不同的聊天（需要 Telegram 群组或频道）：
+```bash
+# 服务器 A
+TELEGRAM_CHAT_ID="-1001234567890"  # 群组A
+
+# 服务器 B
+TELEGRAM_CHAT_ID="-1009876543210"  # 群组B
+```
+
+优点：
+- ✅ 只需管理一个 Bot
+- ✅ 消息通过不同群组隔离
+
+**方案 3: 共用 Bot 和 Chat（不推荐）**
+
+多台服务器使用相同的 Bot Token 和 Chat ID：
+- ⚠️ 所有服务器的消息混在一起
+- ⚠️ 按钮操作可能触发错误的服务器
+- ⚠️ 难以区分消息来源（仅靠主机名区分）
+
+**最佳实践建议：**
+- 如果只有 2-3 台服务器，使用方案1（独立Bot）
+- 如果服务器较多（5台以上），使用方案2（群组隔离）
+- 避免使用方案3，除非仅用于接收通知
 
 ---
 
@@ -337,11 +385,10 @@ sudo snapsync
 1. **修改远程服务器配置** - 服务器地址、端口、路径等
 2. **修改 Telegram 配置** - Bot Token、Chat ID等
 3. **修改保留策略** - 本地/远程保留数量
-4. **修改定时任务** - 备份间隔、备份时间
-5. **查看当前配置** - 显示所有配置项
-6. **编辑配置文件** - 直接编辑配置文件
-7. **重启服务** - 重启所有相关服务
-8. **测试 Telegram 连接** - 验证TG配置
+4. **查看当前配置** - 显示所有配置项
+5. **编辑配置文件** - 直接编辑配置文件
+6. **重启服务** - 重启所有相关服务
+7. **测试 Telegram 连接** - 验证TG配置
 
 ### 配置文件位置
 
@@ -476,6 +523,7 @@ sudo snapsync
 # • 日志文件（可选）
 # • 系统服务
 # • 命令快捷方式
+# • 源代码目录（可选）
 # 
 # 备份文件会询问是否保留
 ```
@@ -524,15 +572,6 @@ curl -sS https://api.telegram.org
 # 如无法访问，可能需要代理
 ```
 
-### 菜单功能报错
-
-**更新到最新版本:**
-```bash
-# 下载最新的 snapsync.sh
-sudo cp snapsync.sh /opt/snapsync/snapsync.sh
-sudo chmod +x /opt/snapsync/snapsync.sh
-```
-
 ### Bot无响应
 
 ```bash
@@ -548,6 +587,22 @@ sudo systemctl restart snapsync-bot
 # 在Telegram重新发送 /start
 ```
 
+### 删除快照按钮无响应
+
+```bash
+# 查看Bot日志寻找错误
+sudo tail -100 /var/log/snapsync/bot.log | grep -i "delete\|删除"
+
+# 检查快照目录权限
+ls -la /backups/system_snapshots/
+
+# 检查临时文件
+ls -la /tmp/snapshots_*.txt
+
+# 重启Bot服务
+sudo systemctl restart snapsync-bot
+```
+
 ### SSH连接失败
 
 ```bash
@@ -561,6 +616,45 @@ chmod 600 /root/.ssh/id_ed25519
 # 查看错误日志
 tail -f /var/log/snapsync/backup.log
 ```
+
+### rsync 命令未找到
+
+**错误信息：**
+```bash
+bash: line 1: rsync: command not found
+rsync: connection unexpectedly closed (0 bytes received so far) [sender]
+rsync error: error in rsync protocol data stream (code 12)
+```
+
+**原因分析：**
+
+SnapSync 在上传快照时会使用 `rsync` 命令同步文件到远程服务器，但远程主机上没有安装 `rsync`，导致传输中断。
+
+**🔍 错误原因分析**
+- 你本地（执行 SnapSync 的机器）有 `rsync`，但远程服务器（你通过 SSH 上传到的那台）缺少 `rsync`
+- `rsync` 是 SnapSync 的核心同步工具，必须两边都装
+
+**✅ 解决方法**
+
+在**远程服务器**上执行以下命令安装：
+
+**对于如果是 Debian / Ubuntu 系列:**
+```bash
+sudo apt-get update
+sudo apt-get install -y rsync
+```
+
+**或如果远程是 RedHat / CentOS:**
+```bash
+sudo yum install -y rsync
+```
+
+**安装完成后，你可以在远程主机上验证：**
+```bash
+rsync --version
+```
+
+如果显示版本信息，说明安装成功。然后重新执行 SnapSync 的上传操作即可。
 
 ---
 
@@ -641,9 +735,9 @@ sha256sum -c *.sha256
 
 **🎮 用户体验**
 - ✨ Bot完全重构为按钮式交互
-- ✨ 新增完全卸载功能
+- ✨ 新增完全卸载功能（支持清理源代码目录）
 - ✨ 完整的配置管理界面
-- ✨ 多VPS统一管理支持
+- ✨ 优化主机名显示
 
 **🔔 通知系统**
 - ✅ 修复TG通知功能
@@ -656,12 +750,15 @@ sha256sum -c *.sha256
 - ✅ Bot服务管理
 - ✅ 多种日志查看方式
 - ✅ 系统信息展示
+- ✅ 删除快照功能优化（修复无响应问题）
 
 **🐛 Bug修复**
 - ✅ 修复readonly变量冲突
 - ✅ 修复命令未找到问题
 - ✅ 修复配置加载错误
 - ✅ 修复权限问题
+- ✅ 修复删除快照按钮无响应
+- ✅ 修复远程快照下载路径处理
 
 ### v2.5 (2024-12-15)
 - 增量备份支持
@@ -713,15 +810,19 @@ sudo snapsync
 rsync -avz /backups/system_snapshots/ backup-server:/remote/backups/
 ```
 
-### 5. 多VPS管理技巧
+### 5. 管理多台服务器
 
 ```bash
-# 为每个VPS设置唯一主机名
+# 方案1：为每个VPS创建独立Bot（推荐）
+# 在BotFather中创建多个Bot
+@VPS1_Bot, @VPS2_Bot, @VPS3_Bot
+
+# 方案2：使用群组隔离
+# 创建不同的Telegram群组，每个VPS使用不同群组的Chat ID
+
+# 设置唯一主机名便于识别
 sudo hostnamectl set-hostname vps-tokyo
 sudo hostnamectl set-hostname vps-singapore
-
-# 使用相同的Bot配置
-# 消息会自动标注主机名
 ```
 
 ---
@@ -748,7 +849,7 @@ sudo hostnamectl set-hostname vps-singapore
 
 - 🐛 问题反馈: [GitHub Issues](https://github.com/kelenetwork/snapsync/issues)
 - 💬 讨论交流: [GitHub Discussions](https://github.com/kelenetwork/snapsync/discussions)
-- 📧 邮件支持: snapsync-support@kele.my
+- 📧 邮件支持: admin@kele.my
 - 📖 完整文档: [Wiki](https://github.com/kelenetwork/snapsync/wiki)
 
 ---
