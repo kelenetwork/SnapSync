@@ -253,77 +253,225 @@ Bot 无法直接执行恢复命令
 cb_delete() {
     answer_cb "$3"
     local dir="${BACKUP_DIR}/system_snapshots"
+    
+    # 检查目录是否存在
+    if [[ ! -d "$dir" ]]; then
+        edit_msg "$1" "$2" "🗑️ <b>删除快照</b>
+
+❌ 快照目录不存在" "$menu_back"
+        log "删除失败: 快照目录不存在 $dir"
+        return
+    fi
+    
+    # 收集快照文件
     local snaps=()
     while IFS= read -r -d '' f; do
         [[ "$f" != *.sha256 ]] && snaps+=("$f")
     done < <(find "$dir" -name "*.tar*" -type f -print0 2>/dev/null | sort -zr)
     
-    [[ ${#snaps[@]} -eq 0 ]] && edit_msg "$1" "$2" "🗑️ <b>删除快照</b>
+    # 检查是否有快照
+    if [[ ${#snaps[@]} -eq 0 ]]; then
+        edit_msg "$1" "$2" "🗑️ <b>删除快照</b>
 
-❌ 暂无可删除的快照" "$menu_back" && return
+❌ 暂无可删除的快照
+
+<i>点击「创建快照」开始备份</i>" "$menu_back"
+        log "删除失败: 无可用快照"
+        return
+    fi
     
-    printf "%s\n" "${snaps[@]}" > "/tmp/snapshots_$1.txt"
+    # 保存快照列表到临时文件
+    local temp_file="/tmp/snapshots_$1.txt"
+    printf "%s\n" "${snaps[@]}" > "$temp_file"
+    log "快照列表已保存: $temp_file (${#snaps[@]} 个)"
     
-    local btns='['
+    # 构建键盘按钮
+    local buttons=()
     local i=0
     for f in "${snaps[@]}"; do
         [[ $i -ge 10 ]] && break
+        
         local n=$(basename "$f")
-        local sn="${n:17:20}"
-        btns+="[{\"text\":\"$((i+1)). ${sn}...\",\"callback_data\":\"del_${i}\"}],"
+        # 安全截取文件名（从 system_snapshot_ 之后开始）
+        local display_name=""
+        if [[ "$n" =~ ^system_snapshot_([0-9]{14}) ]]; then
+            # 格式: YYYYMMDDHHMMSS
+            local ts="${BASH_REMATCH[1]}"
+            local year="${ts:0:4}"
+            local month="${ts:4:2}"
+            local day="${ts:6:2}"
+            local hour="${ts:8:2}"
+            local min="${ts:10:2}"
+            display_name="${month}-${day} ${hour}:${min}"
+        else
+            # 如果不符合预期格式，取前20个字符
+            display_name="${n:0:20}"
+        fi
+        
+        # 转义特殊字符（防止破坏 JSON）
+        display_name=$(echo "$display_name" | sed 's/"/\\"/g')
+        
+        # 添加按钮（每个按钮单独一行）
+        buttons+=("[{\"text\":\"$((i+1)). ${display_name}\",\"callback_data\":\"del_${i}\"}]")
         ((i++))
     done
-    btns="${btns%,}]"
-    local kb="{\"inline_keyboard\":${btns},[{\"text\":\"🔙 返回主菜单\",\"callback_data\":\"main\"}]}"
     
+    # 构建完整的 inline keyboard JSON
+    local keyboard_json="{\"inline_keyboard\":["
+    
+    # 添加快照按钮
+    for btn in "${buttons[@]}"; do
+        keyboard_json+="${btn},"
+    done
+    
+    # 添加返回按钮
+    keyboard_json+="[{\"text\":\"🔙 返回主菜单\",\"callback_data\":\"main\"}]"
+    keyboard_json+="]}"
+    
+    log "键盘JSON已构建，包含 ${#buttons[@]} 个快照按钮"
+    
+    # 发送消息
     edit_msg "$1" "$2" "🗑️ <b>删除快照</b>
 
 找到 ${#snaps[@]} 个快照
 请选择要删除的快照:
 
 ⚠️ <b>删除后无法恢复</b>
-显示前 $i 个，完整列表见「快照列表」" "$kb"
+显示前 ${#buttons[@]} 个，完整列表见「快照列表」" "$keyboard_json"
 }
 
 cb_delete_confirm() {
     answer_cb "$3"
-    local snaps=(); while IFS= read -r l; do snaps+=("$l"); done < "/tmp/snapshots_$1.txt"
-    local f="${snaps[$4]}"
+    
+    # 读取快照列表
+    local temp_file="/tmp/snapshots_$1.txt"
+    if [[ ! -f "$temp_file" ]]; then
+        edit_msg "$1" "$2" "❌ <b>错误</b>
+
+快照列表已过期
+请重新选择" "$menu_back"
+        log "删除确认失败: 临时文件不存在"
+        return
+    fi
+    
+    local snaps=()
+    while IFS= read -r line; do
+        snaps+=("$line")
+    done < "$temp_file"
+    
+    # 验证索引
+    local idx="$4"
+    if [[ ! "$idx" =~ ^[0-9]+$ ]] || [[ $idx -ge ${#snaps[@]} ]]; then
+        edit_msg "$1" "$2" "❌ <b>错误</b>
+
+快照索引无效
+请重新选择" "$menu_back"
+        log "删除确认失败: 无效索引 $idx"
+        return
+    fi
+    
+    local f="${snaps[$idx]}"
+    
+    # 检查文件是否存在
+    if [[ ! -f "$f" ]]; then
+        edit_msg "$1" "$2" "❌ <b>错误</b>
+
+快照文件不存在
+可能已被删除" "$menu_back"
+        log "删除确认失败: 文件不存在 $f"
+        return
+    fi
+    
     local n=$(basename "$f")
     local s=$(stat -c%s "$f" 2>/dev/null || echo 0)
     local sz=$(format_bytes "$s")
+    local dt=$(date -r "$f" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "未知")
     
-    local kb="{\"inline_keyboard\":[[{\"text\":\"✅ 确认删除\",\"callback_data\":\"delx_$4\"}],[{\"text\":\"❌ 取消\",\"callback_data\":\"delete\"}]]}"
+    # 构建确认键盘
+    local confirm_kb="{\"inline_keyboard\":[[{\"text\":\"✅ 确认删除\",\"callback_data\":\"delx_${idx}\"}],[{\"text\":\"❌ 取消\",\"callback_data\":\"delete\"}]]}"
+    
     edit_msg "$1" "$2" "🗑️ <b>确认删除</b>
 
 📸 快照: <code>${n}</code>
 📦 大小: ${sz}
+📅 时间: ${dt}
 
 ⚠️ <b>此操作不可撤销！</b>
-确认删除？" "$kb"
+
+确认删除此快照？" "$confirm_kb"
+    
+    log "显示删除确认: $n"
 }
 
 cb_delete_exec() {
     answer_cb "$3" "🗑️ 正在删除..."
-    local snaps=(); while IFS= read -r l; do snaps+=("$l"); done < "/tmp/snapshots_$1.txt"
-    local f="${snaps[$4]}"
+    
+    # 读取快照列表
+    local temp_file="/tmp/snapshots_$1.txt"
+    if [[ ! -f "$temp_file" ]]; then
+        edit_msg "$1" "$2" "❌ <b>删除失败</b>
+
+快照列表已过期" "$menu_back"
+        log "删除执行失败: 临时文件不存在"
+        return
+    fi
+    
+    local snaps=()
+    while IFS= read -r line; do
+        snaps+=("$line")
+    done < "$temp_file"
+    
+    # 验证索引
+    local idx="$4"
+    if [[ ! "$idx" =~ ^[0-9]+$ ]] || [[ $idx -ge ${#snaps[@]} ]]; then
+        edit_msg "$1" "$2" "❌ <b>删除失败</b>
+
+快照索引无效" "$menu_back"
+        log "删除执行失败: 无效索引 $idx"
+        rm -f "$temp_file"
+        return
+    fi
+    
+    local f="${snaps[$idx]}"
     local n=$(basename "$f")
     
+    # 执行删除
+    log "准备删除快照: $f"
+    
+    if [[ ! -f "$f" ]]; then
+        edit_msg "$1" "$2" "❌ <b>删除失败</b>
+
+📸 ${n}
+
+文件不存在，可能已被删除" "$menu_back"
+        log "删除执行失败: 文件不存在 $f"
+        rm -f "$temp_file"
+        return
+    fi
+    
+    # 删除快照文件和校验文件
     if rm -f "$f" "${f}.sha256" 2>/dev/null; then
         edit_msg "$1" "$2" "✅ <b>删除成功</b>
 
 📸 ${n}
 
-已从系统中移除" "$menu_back"
-        log "删除快照: $n"
+快照已从系统中移除
+
+<i>$(date '+%Y-%m-%d %H:%M:%S')</i>" "$menu_back"
+        log "快照已删除: $n"
     else
         edit_msg "$1" "$2" "❌ <b>删除失败</b>
 
 📸 ${n}
 
-可能权限不足或文件不存在" "$menu_back"
+删除操作失败，可能是权限不足
+
+<i>请检查文件权限和磁盘状态</i>" "$menu_back"
+        log "删除执行失败: rm 命令失败 $f"
     fi
-    rm -f "/tmp/snapshots_$1.txt"
+    
+    # 清理临时文件
+    rm -f "$temp_file"
 }
 
 cb_config() {
