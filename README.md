@@ -869,7 +869,7 @@ sudo hostnamectl set-hostname vps-singapore
 
 **SnapSync v3.0** - 让系统快照变得简单、安全、可靠
 
-Made with ❤️ by [Kele Network](https://github.com/kelenetwork)
+Made with ❤️ by [Kele Network](https://t.me/ke1e_bot)
 
 [![Star](https://img.shields.io/github/stars/kelenetwork/snapsync?style=social)](https://github.com/kelenetwork/snapsync)
 [![Fork](https://img.shields.io/github/forks/kelenetwork/snapsync?style=social)](https://github.com/kelenetwork/snapsync/fork)
