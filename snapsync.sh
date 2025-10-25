@@ -7,7 +7,8 @@ set -euo pipefail
 # ===== 版本信息 =====
 SNAPSYNC_VERSION="3.0.1"
 GITHUB_REPO="kelenetwork/SnapSync"
-GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main"
+GITHUB_CLONE_URL="https://github.com/${GITHUB_REPO}.git"
+
 
 # ===== 颜色定义 =====
 RED='\033[0;31m'
@@ -621,241 +622,189 @@ upgrade_snapsync() {
     log "${GREEN}✓ 网络连接正常${NC}"
     echo ""
     
-    # 检查最新版本
-    log "检查最新版本..."
-    local latest_version=$(curl -sS -m 10 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
-    
-    if [[ -z "$latest_version" ]]; then
-        log "${YELLOW}⚠ 无法获取最新版本信息${NC}"
+    # 检查 git 是否安装
+    if ! command -v git &>/dev/null; then
+        log "${RED}✗ 未安装 git${NC}"
         echo ""
-        read -p "是否继续从 main 分支升级? [y/N]: " force_upgrade
-        if [[ ! "$force_upgrade" =~ ^[Yy]$ ]]; then
-            log "已取消"
-            pause
-            return
-        fi
-    else
-        echo "最新版本: v${latest_version}"
-        echo ""
-        
-        # 版本比较
-        if [[ "$SNAPSYNC_VERSION" == "$latest_version" ]]; then
-            log "${GREEN}✓ 当前已是最新版本${NC}"
-            echo ""
-            read -p "是否强制重新安装? [y/N]: " force_reinstall
-            if [[ ! "$force_reinstall" =~ ^[Yy]$ ]]; then
-                pause
-                return
-            fi
-        fi
-    fi
-    
-    # 选择升级方式
-    echo -e "${YELLOW}升级方式:${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}1)${NC} 从 GitHub 下载（推荐）"
-    echo -e "  ${GREEN}2)${NC} 从本地仓库更新（需要已克隆）"
-    echo -e "  ${RED}0)${NC} 取消"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    
-    read -p "请选择 [0-2]: " upgrade_method
-    
-    case "$upgrade_method" in
-        1) upgrade_from_github ;;
-        2) upgrade_from_local ;;
-        0) log "已取消"; pause; return ;;
-        *) log "${RED}无效选择${NC}"; sleep 1; return ;;
-    esac
-}
-
-upgrade_from_github() {
-    echo ""
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${CYAN}从 GitHub 下载升级${NC}"
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    
-    local temp_dir="/tmp/snapsync_upgrade_$$"
-    mkdir -p "$temp_dir"
-    
-    log "1. 下载最新代码..."
-    
-    # 下载核心文件
-    local files=(
-        "backup.sh"
-        "restore.sh"
-        "config.sh"
-        "snapsync.sh"
-        "telegram_bot.sh"
-        "telegram-test.sh"
-        "install.sh"
-    )
-    
-    local download_failed=0
-    for file in "${files[@]}"; do
-        echo -n "  下载 $file... "
-        if curl -sS -m 30 -o "$temp_dir/$file" "${GITHUB_RAW_URL}/$file" 2>/dev/null; then
-            echo -e "${GREEN}✓${NC}"
-        else
-            echo -e "${RED}✗${NC}"
-            ((download_failed++))
-        fi
-    done
-    
-    if [[ $download_failed -gt 0 ]]; then
-        log "${RED}✗ 下载失败 ($download_failed 个文件)${NC}"
-        rm -rf "$temp_dir"
+        log "请先安装 git:"
+        echo "  apt-get update && apt-get install -y git"
         pause
         return
     fi
-    
-    log "${GREEN}✓ 所有文件下载完成${NC}"
+    log "${GREEN}✓ git 已安装${NC}"
     echo ""
     
-    log "2. 验证文件..."
-    for file in "${files[@]}"; do
-        if [[ ! -s "$temp_dir/$file" ]]; then
-            log "${RED}✗ $file 为空${NC}"
-            rm -rf "$temp_dir"
-            pause
-            return
-        fi
-        
-        if [[ "$file" == *.sh ]]; then
-            if ! bash -n "$temp_dir/$file" 2>/dev/null; then
-                log "${RED}✗ $file 语法错误${NC}"
-                rm -rf "$temp_dir"
-                pause
-                return
-            fi
-        fi
-    done
-    log "${GREEN}✓ 文件验证通过${NC}"
-    echo ""
-    
-    log "3. 备份当前版本..."
-    local backup_dir="/opt/snapsync_backup_$(date +%Y%m%d_%H%M%S)"
-    cp -r "$INSTALL_DIR" "$backup_dir"
-    log "${GREEN}✓ 已备份到: $backup_dir${NC}"
-    echo ""
-    
-    log "4. 更新文件..."
-    cp "$temp_dir/backup.sh" "$MODULE_DIR/"
-    cp "$temp_dir/restore.sh" "$MODULE_DIR/"
-    cp "$temp_dir/config.sh" "$MODULE_DIR/"
-    cp "$temp_dir/snapsync.sh" "$INSTALL_DIR/"
-    cp "$temp_dir/telegram_bot.sh" "$INSTALL_DIR/bot/" 2>/dev/null || true
-    cp "$temp_dir/telegram-test.sh" "/usr/local/bin/telegram-test"
-    
-    chmod +x "$MODULE_DIR"/*.sh
-    chmod +x "$INSTALL_DIR/snapsync.sh"
-    chmod +x "$INSTALL_DIR/bot/telegram_bot.sh" 2>/dev/null || true
-    chmod +x "/usr/local/bin/telegram-test"
-    
-    log "${GREEN}✓ 文件已更新${NC}"
-    echo ""
-    
-    log "5. 重启服务..."
-    systemctl daemon-reload
-    systemctl restart snapsync-bot 2>/dev/null || true
-    systemctl restart snapsync-backup.timer 2>/dev/null || true
-    log "${GREEN}✓ 服务已重启${NC}"
-    echo ""
-    
-    # 清理
-    rm -rf "$temp_dir"
-    
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${GREEN}✓✓✓ 升级完成！✓✓✓${NC}"
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    log "已升级到最新版本"
-    log "备份位置: $backup_dir"
-    echo ""
-    log "如需回退:"
-    log "  sudo cp -r $backup_dir/* $INSTALL_DIR/"
-    echo ""
-    
-    pause
-}
-
-upgrade_from_local() {
-    echo ""
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${CYAN}从本地仓库升级${NC}"
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    
-    # 查找本地仓库
-    local repo_paths=(
+    # 查找源代码目录
+    log "查找源代码目录..."
+    local source_dirs=(
         "/root/SnapSync"
         "/root/snapsync"
         "$HOME/SnapSync"
         "$HOME/snapsync"
     )
     
-    local repo_dir=""
-    for path in "${repo_paths[@]}"; do
-        if [[ -d "$path/.git" ]]; then
-            repo_dir="$path"
+    local found_dir=""
+    for dir in "${source_dirs[@]}"; do
+        if [[ -d "$dir/.git" ]]; then
+            found_dir="$dir"
+            log "${GREEN}✓ 找到源代码: $dir${NC}"
             break
         fi
     done
     
-    if [[ -z "$repo_dir" ]]; then
-        log "${YELLOW}⚠ 未找到本地仓库${NC}"
+    # 如果没找到，使用默认位置
+    if [[ -z "$found_dir" ]]; then
+        log "${YELLOW}⚠ 未找到现有的源代码目录${NC}"
         echo ""
-        echo "请指定仓库路径，或按 Enter 取消:"
-        read -p "仓库路径: " custom_repo
-        
-        if [[ -z "$custom_repo" ]]; then
-            log "已取消"
-            pause
-            return
-        fi
-        
-        if [[ ! -d "$custom_repo/.git" ]]; then
-            log "${RED}✗ 无效的 Git 仓库${NC}"
-            pause
-            return
-        fi
-        
-        repo_dir="$custom_repo"
+        echo "将在 /root/SnapSync 下载最新代码"
+        found_dir="/root/SnapSync"
     fi
-    
-    log "找到仓库: $repo_dir"
     echo ""
     
-    log "1. 更新仓库..."
-    cd "$repo_dir"
-    if git pull; then
-        log "${GREEN}✓ 仓库已更新${NC}"
+    # 确认升级
+    log "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${YELLOW}升级计划:${NC}"
+    echo "  1. 备份当前安装"
+    echo "  2. 清理旧的源代码目录"
+    echo "  3. 重新克隆最新代码"
+    echo "  4. 运行安装脚本"
+    echo "  5. 重启服务"
+    echo ""
+    echo "源代码位置: $found_dir"
+    log "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    read -p "确认开始升级? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log "已取消"
+        pause
+        return
+    fi
+    
+    echo ""
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}开始升级...${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    # 1. 备份当前安装
+    log "${YELLOW}[1/5]${NC} 备份当前版本..."
+    local backup_dir="/opt/snapsync_backup_$(date +%Y%m%d_%H%M%S)"
+    if cp -r "$INSTALL_DIR" "$backup_dir" 2>/dev/null; then
+        log "${GREEN}  ✓ 已备份到: $backup_dir${NC}"
     else
-        log "${RED}✗ 更新失败${NC}"
+        log "${YELLOW}  ⚠ 备份失败，但继续升级${NC}"
+    fi
+    echo ""
+    
+    # 2. 清理旧的源代码目录
+    log "${YELLOW}[2/5]${NC} 清理旧源代码..."
+    if [[ -d "$found_dir" ]]; then
+        # 保存当前目录
+        local original_dir="$(pwd)"
+        
+        # 如果当前在源代码目录中，先切换出去
+        if [[ "$(pwd)" == "$found_dir"* ]]; then
+            cd /root 2>/dev/null || cd / 2>/dev/null
+            log "  → 已切换工作目录"
+        fi
+        
+        # 删除源代码目录
+        if rm -rf "$found_dir" 2>/dev/null; then
+            log "${GREEN}  ✓ 已删除: $found_dir${NC}"
+        else
+            log "${RED}  ✗ 删除失败: $found_dir${NC}"
+            log "${YELLOW}  请手动删除该目录后重试${NC}"
+            pause
+            return
+        fi
+    else
+        log "${GREEN}  ✓ 无需清理${NC}"
+    fi
+    echo ""
+    
+    # 3. 克隆最新代码
+    log "${YELLOW}[3/5]${NC} 下载最新代码..."
+    local parent_dir="$(dirname "$found_dir")"
+    cd "$parent_dir" || {
+        log "${RED}  ✗ 无法切换到目录: $parent_dir${NC}"
+        pause
+        return
+    }
+    
+    log "  从 GitHub 克隆仓库..."
+    if git clone "${GITHUB_CLONE_URL}" "$(basename "$found_dir")" 2>&1 | tee -a "$LOG_DIR/main.log" | grep -E "(Cloning|Receiving|Resolving)" | while read line; do echo "    $line"; done; then
+        log "${GREEN}  ✓ 代码下载完成${NC}"
+    else
+        log "${RED}  ✗ 克隆失败${NC}"
+        echo ""
+        log "如需回退:"
+        log "  sudo cp -r $backup_dir/* $INSTALL_DIR/"
         pause
         return
     fi
     echo ""
     
-    log "2. 运行安装脚本..."
-    if bash install.sh; then
-        log "${GREEN}✓ 安装完成${NC}"
-    else
-        log "${RED}✗ 安装失败${NC}"
+    # 4. 运行安装脚本
+    log "${YELLOW}[4/5]${NC} 运行安装脚本..."
+    cd "$found_dir" || {
+        log "${RED}  ✗ 无法进入目录: $found_dir${NC}"
+        pause
+        return
+    }
+    
+    if [[ ! -f "install.sh" ]]; then
+        log "${RED}  ✗ 找不到 install.sh${NC}"
         pause
         return
     fi
     
+    log "  执行安装..."
+    echo ""
+    
+    # 运行安装脚本（自动选择覆盖安装）
+    if echo "1" | bash install.sh 2>&1 | tee -a "$LOG_DIR/main.log"; then
+        log ""
+        log "${GREEN}  ✓ 安装完成${NC}"
+    else
+        log ""
+        log "${RED}  ✗ 安装失败${NC}"
+        echo ""
+        log "如需回退:"
+        log "  sudo cp -r $backup_dir/* $INSTALL_DIR/"
+        pause
+        return
+    fi
+    echo ""
+    
+    # 5. 重启服务
+    log "${YELLOW}[5/5]${NC} 重启服务..."
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart snapsync-bot 2>/dev/null && log "  ✓ Bot 服务已重启" || log "  ⊙ Bot 服务未运行"
+    systemctl restart snapsync-backup.timer 2>/dev/null && log "  ✓ 定时器已重启" || log "  ⊙ 定时器未启用"
+    echo ""
+    
+    # 完成
     log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     log "${GREEN}✓✓✓ 升级完成！✓✓✓${NC}"
     log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     
+    log "升级成功！"
+    log "源代码位置: $found_dir"
+    log "备份位置: $backup_dir"
+    echo ""
+    
+    log "${YELLOW}如需回退到旧版本:${NC}"
+    log "  sudo cp -r $backup_dir/* $INSTALL_DIR/"
+    log "  sudo systemctl daemon-reload"
+    log "  sudo systemctl restart snapsync-bot snapsync-backup.timer"
+    echo ""
+    
     pause
 }
 
-# ===== 9. 完全卸载（修复版 - 彻底清理）=====
+# ===== 10. 完全卸载（修复版 - 彻底清理）=====
 uninstall_snapsync() {
     show_header
     log "${RED}完全卸载 SnapSync${NC}\n"
