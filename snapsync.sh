@@ -1,8 +1,13 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 主控制脚本（完整版）
+# SnapSync v3.0.1 - 主控制脚本（增强版 - 带升级功能）
 
 set -euo pipefail
+
+# ===== 版本信息 =====
+SNAPSYNC_VERSION="3.0.1"
+GITHUB_REPO="kelenetwork/SnapSync"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main"
 
 # ===== 颜色定义 =====
 RED='\033[0;31m'
@@ -35,7 +40,7 @@ log() {
 show_header() {
     clear
     echo -e "${BLUE}╔════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${CYAN}       SnapSync v3.0 管理控制台            ${BLUE}║${NC}"
+    echo -e "${BLUE}║${CYAN}       SnapSync v${SNAPSYNC_VERSION} 管理控制台         ${BLUE}║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -87,7 +92,8 @@ show_main_menu() {
     echo -e "  ${GREEN}6)${NC} 🗑️  清理旧快照"
     echo -e "  ${GREEN}7)${NC} 📋 查看日志"
     echo -e "  ${GREEN}8)${NC} ℹ️  系统信息"
-    echo -e "  ${GREEN}9)${NC} 🧹 完全卸载"
+    echo -e "  ${GREEN}9)${NC} 🔧 升级到最新版本"
+    echo -e "  ${GREEN}10)${NC} 🧹 完全卸载"
     echo -e "  ${RED}0)${NC} 🚪 退出"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -582,7 +588,7 @@ show_system_info() {
     source "$CONFIG_FILE" 2>/dev/null || true
     
     echo -e "${YELLOW}SnapSync 信息:${NC}"
-    echo "  版本: v3.0"
+    echo "  版本: v${SNAPSYNC_VERSION}"
     echo "  备份目录: ${BACKUP_DIR:-/backups}"
     echo "  Telegram: ${TELEGRAM_ENABLED:-false}"
     echo "  远程备份: ${REMOTE_ENABLED:-false}"
@@ -591,7 +597,265 @@ show_system_info() {
     pause
 }
 
-# ===== 9. 完全卸载（修复版 - 彻底清理）=====
+# ===== 9. 升级功能 =====
+upgrade_snapsync() {
+    show_header
+    log "${CYAN}升级 SnapSync${NC}\n"
+    
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}SnapSync 升级向导${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "当前版本: v${SNAPSYNC_VERSION}"
+    echo ""
+    
+    # 检查网络连接
+    log "检查网络连接..."
+    if ! curl -sS -m 10 --head https://github.com &>/dev/null; then
+        log "${RED}✗ 无法连接到 GitHub${NC}"
+        echo ""
+        echo "请检查网络连接或防火墙设置"
+        pause
+        return
+    fi
+    log "${GREEN}✓ 网络连接正常${NC}"
+    echo ""
+    
+    # 检查最新版本
+    log "检查最新版本..."
+    local latest_version=$(curl -sS -m 10 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+    
+    if [[ -z "$latest_version" ]]; then
+        log "${YELLOW}⚠ 无法获取最新版本信息${NC}"
+        echo ""
+        read -p "是否继续从 main 分支升级? [y/N]: " force_upgrade
+        if [[ ! "$force_upgrade" =~ ^[Yy]$ ]]; then
+            log "已取消"
+            pause
+            return
+        fi
+    else
+        echo "最新版本: v${latest_version}"
+        echo ""
+        
+        # 版本比较
+        if [[ "$SNAPSYNC_VERSION" == "$latest_version" ]]; then
+            log "${GREEN}✓ 当前已是最新版本${NC}"
+            echo ""
+            read -p "是否强制重新安装? [y/N]: " force_reinstall
+            if [[ ! "$force_reinstall" =~ ^[Yy]$ ]]; then
+                pause
+                return
+            fi
+        fi
+    fi
+    
+    # 选择升级方式
+    echo -e "${YELLOW}升级方式:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${GREEN}1)${NC} 从 GitHub 下载（推荐）"
+    echo -e "  ${GREEN}2)${NC} 从本地仓库更新（需要已克隆）"
+    echo -e "  ${RED}0)${NC} 取消"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    read -p "请选择 [0-2]: " upgrade_method
+    
+    case "$upgrade_method" in
+        1) upgrade_from_github ;;
+        2) upgrade_from_local ;;
+        0) log "已取消"; pause; return ;;
+        *) log "${RED}无效选择${NC}"; sleep 1; return ;;
+    esac
+}
+
+upgrade_from_github() {
+    echo ""
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}从 GitHub 下载升级${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    local temp_dir="/tmp/snapsync_upgrade_$$"
+    mkdir -p "$temp_dir"
+    
+    log "1. 下载最新代码..."
+    
+    # 下载核心文件
+    local files=(
+        "backup.sh"
+        "restore.sh"
+        "config.sh"
+        "snapsync.sh"
+        "telegram_bot.sh"
+        "telegram-test.sh"
+        "install.sh"
+    )
+    
+    local download_failed=0
+    for file in "${files[@]}"; do
+        echo -n "  下载 $file... "
+        if curl -sS -m 30 -o "$temp_dir/$file" "${GITHUB_RAW_URL}/$file" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC}"
+        else
+            echo -e "${RED}✗${NC}"
+            ((download_failed++))
+        fi
+    done
+    
+    if [[ $download_failed -gt 0 ]]; then
+        log "${RED}✗ 下载失败 ($download_failed 个文件)${NC}"
+        rm -rf "$temp_dir"
+        pause
+        return
+    fi
+    
+    log "${GREEN}✓ 所有文件下载完成${NC}"
+    echo ""
+    
+    log "2. 验证文件..."
+    for file in "${files[@]}"; do
+        if [[ ! -s "$temp_dir/$file" ]]; then
+            log "${RED}✗ $file 为空${NC}"
+            rm -rf "$temp_dir"
+            pause
+            return
+        fi
+        
+        if [[ "$file" == *.sh ]]; then
+            if ! bash -n "$temp_dir/$file" 2>/dev/null; then
+                log "${RED}✗ $file 语法错误${NC}"
+                rm -rf "$temp_dir"
+                pause
+                return
+            fi
+        fi
+    done
+    log "${GREEN}✓ 文件验证通过${NC}"
+    echo ""
+    
+    log "3. 备份当前版本..."
+    local backup_dir="/opt/snapsync_backup_$(date +%Y%m%d_%H%M%S)"
+    cp -r "$INSTALL_DIR" "$backup_dir"
+    log "${GREEN}✓ 已备份到: $backup_dir${NC}"
+    echo ""
+    
+    log "4. 更新文件..."
+    cp "$temp_dir/backup.sh" "$MODULE_DIR/"
+    cp "$temp_dir/restore.sh" "$MODULE_DIR/"
+    cp "$temp_dir/config.sh" "$MODULE_DIR/"
+    cp "$temp_dir/snapsync.sh" "$INSTALL_DIR/"
+    cp "$temp_dir/telegram_bot.sh" "$INSTALL_DIR/bot/"
+    cp "$temp_dir/telegram-test.sh" "/usr/local/bin/telegram-test"
+    
+    chmod +x "$MODULE_DIR"/*.sh
+    chmod +x "$INSTALL_DIR/snapsync.sh"
+    chmod +x "$INSTALL_DIR/bot/telegram_bot.sh"
+    chmod +x "/usr/local/bin/telegram-test"
+    
+    log "${GREEN}✓ 文件已更新${NC}"
+    echo ""
+    
+    log "5. 重启服务..."
+    systemctl daemon-reload
+    systemctl restart snapsync-bot 2>/dev/null || true
+    systemctl restart snapsync-backup.timer 2>/dev/null || true
+    log "${GREEN}✓ 服务已重启${NC}"
+    echo ""
+    
+    # 清理
+    rm -rf "$temp_dir"
+    
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${GREEN}✓✓✓ 升级完成！✓✓✓${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    log "已升级到最新版本"
+    log "备份位置: $backup_dir"
+    echo ""
+    log "如需回退:"
+    log "  sudo cp -r $backup_dir/* $INSTALL_DIR/"
+    echo ""
+    
+    pause
+}
+
+upgrade_from_local() {
+    echo ""
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${CYAN}从本地仓库升级${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    # 查找本地仓库
+    local repo_paths=(
+        "/root/SnapSync"
+        "/root/snapsync"
+        "$HOME/SnapSync"
+        "$HOME/snapsync"
+    )
+    
+    local repo_dir=""
+    for path in "${repo_paths[@]}"; do
+        if [[ -d "$path/.git" ]]; then
+            repo_dir="$path"
+            break
+        fi
+    done
+    
+    if [[ -z "$repo_dir" ]]; then
+        log "${YELLOW}⚠ 未找到本地仓库${NC}"
+        echo ""
+        echo "请指定仓库路径，或按 Enter 取消:"
+        read -p "仓库路径: " custom_repo
+        
+        if [[ -z "$custom_repo" ]]; then
+            log "已取消"
+            pause
+            return
+        fi
+        
+        if [[ ! -d "$custom_repo/.git" ]]; then
+            log "${RED}✗ 无效的 Git 仓库${NC}"
+            pause
+            return
+        fi
+        
+        repo_dir="$custom_repo"
+    fi
+    
+    log "找到仓库: $repo_dir"
+    echo ""
+    
+    log "1. 更新仓库..."
+    cd "$repo_dir"
+    if git pull; then
+        log "${GREEN}✓ 仓库已更新${NC}"
+    else
+        log "${RED}✗ 更新失败${NC}"
+        pause
+        return
+    fi
+    echo ""
+    
+    log "2. 运行安装脚本..."
+    if bash install.sh; then
+        log "${GREEN}✓ 安装完成${NC}"
+    else
+        log "${RED}✗ 安装失败${NC}"
+        pause
+        return
+    fi
+    
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${GREEN}✓✓✓ 升级完成！✓✓✓${NC}"
+    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    pause
+}
+
+# ===== 10. 完全卸载 =====
 uninstall_snapsync() {
     show_header
     log "${RED}完全卸载 SnapSync${NC}\n"
@@ -601,29 +865,23 @@ uninstall_snapsync() {
     echo -e "${RED}╚════════════════════════════════════════════╝${NC}"
     echo ""
     log "${YELLOW}此操作将删除：${NC}"
-    echo "  ✓ 所有程序文件 (/opt/snapsync)"
-    echo "  ✓ 所有配置文件 (/etc/snapsync)"
-    echo "  ✓ 所有日志文件 (/var/log/snapsync)"
+    echo "  ✓ 所有程序文件"
+    echo "  ✓ 所有配置文件"
+    echo "  ✓ 所有日志文件"
     echo "  ✓ 所有系统服务"
     echo "  ✓ 所有命令快捷方式"
     echo "  ? 备份文件 (询问)"
-    echo "  ? 源代码目录 (询问)"
     echo ""
     
-    # 第一次确认
-    read -p "确认卸载 SnapSync? [y/N]: " confirm1
-    
+    read -p "确认卸载? [y/N]: " confirm1
     if [[ ! "$confirm1" =~ ^[Yy]$ ]]; then
         log "已取消"
         pause
         return
     fi
     
-    # 第二次确认（输入验证码）
     echo ""
-    log "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${RED}最终确认: 请输入 'YES DELETE' 继续卸载${NC}"
-    log "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    log "${RED}最终确认: 请输入 'YES DELETE'${NC}"
     read -p "> " confirm2
     
     if [[ "$confirm2" != "YES DELETE" ]]; then
@@ -632,188 +890,47 @@ uninstall_snapsync() {
         return
     fi
     
-    log "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${CYAN}开始卸载...${NC}"
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    log "\n${CYAN}开始卸载...${NC}\n"
     
-    # 1. 停止并禁用服务
-    log "${YELLOW}[1/9] 停止服务...${NC}"
+    # 停止服务
+    log "停止服务..."
     systemctl stop snapsync-bot 2>/dev/null || true
     systemctl stop snapsync-backup.timer 2>/dev/null || true
     systemctl disable snapsync-bot 2>/dev/null || true
     systemctl disable snapsync-backup.timer 2>/dev/null || true
-    log "${GREEN}  ✓ 服务已停止${NC}"
     
-    # 2. 删除服务文件
-    log "${YELLOW}[2/9] 删除服务文件...${NC}"
-    rm -f /etc/systemd/system/snapsync-bot.service
-    rm -f /etc/systemd/system/snapsync-backup.service
-    rm -f /etc/systemd/system/snapsync-backup.timer
+    # 删除服务文件
+    rm -f /etc/systemd/system/snapsync-*.service
+    rm -f /etc/systemd/system/snapsync-*.timer
     systemctl daemon-reload
-    log "${GREEN}  ✓ 服务文件已删除${NC}"
     
-    # 3. 删除命令快捷方式
-    log "${YELLOW}[3/9] 删除命令快捷方式...${NC}"
-    rm -f /usr/local/bin/snapsync
-    rm -f /usr/local/bin/snapsync-backup
-    rm -f /usr/local/bin/snapsync-restore
+    # 删除命令
+    rm -f /usr/local/bin/snapsync*
     rm -f /usr/local/bin/telegram-test
-    log "${GREEN}  ✓ 命令快捷方式已删除${NC}"
     
-    # 4. 删除程序文件
-    log "${YELLOW}[4/9] 删除程序文件...${NC}"
-    if [[ -d "$INSTALL_DIR" ]]; then
-        rm -rf "$INSTALL_DIR"
-        log "${GREEN}  ✓ 程序文件已删除: $INSTALL_DIR${NC}"
-    else
-        log "${YELLOW}  ⚠ 程序目录不存在${NC}"
-    fi
+    # 删除程序
+    rm -rf "$INSTALL_DIR"
     
-    # 5. 询问是否删除配置
-    echo ""
-    log "${YELLOW}[5/9] 配置文件处理...${NC}"
-    read -p "是否删除配置文件? [y/N]: " del_config
-    if [[ "$del_config" =~ ^[Yy]$ ]]; then
-        if [[ -d "$CONFIG_DIR" ]]; then
-            rm -rf "$CONFIG_DIR"
-            log "${GREEN}  ✓ 配置文件已删除: $CONFIG_DIR${NC}"
-        fi
-    else
-        log "${YELLOW}  ⊙ 配置文件已保留: $CONFIG_DIR${NC}"
-    fi
+    # 删除配置
+    read -p "删除配置文件? [y/N]: " del_config
+    [[ "$del_config" =~ ^[Yy]$ ]] && rm -rf "$CONFIG_DIR"
     
-    # 6. 询问是否删除日志
-    echo ""
-    log "${YELLOW}[6/9] 日志文件处理...${NC}"
-    read -p "是否删除日志文件? [y/N]: " del_logs
-    if [[ "$del_logs" =~ ^[Yy]$ ]]; then
-        if [[ -d "$LOG_DIR" ]]; then
-            rm -rf "$LOG_DIR"
-            log "${GREEN}  ✓ 日志文件已删除: $LOG_DIR${NC}"
-        fi
-    else
-        log "${YELLOW}  ⊙ 日志文件已保留: $LOG_DIR${NC}"
-    fi
+    # 删除日志
+    read -p "删除日志文件? [y/N]: " del_logs
+    [[ "$del_logs" =~ ^[Yy]$ ]] && rm -rf "$LOG_DIR"
     
-    # 7. 询问是否删除备份
-    echo ""
-    log "${YELLOW}[7/9] 备份文件处理...${NC}"
-    
-    # 加载配置获取备份目录
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE" 2>/dev/null || true
-    fi
+    # 删除备份
+    source "$CONFIG_FILE" 2>/dev/null || true
     local backup_dir="${BACKUP_DIR:-/backups}"
-    
     if [[ -d "$backup_dir/system_snapshots" ]]; then
-        local snapshot_count=$(find "$backup_dir/system_snapshots" -name "*.tar*" -type f 2>/dev/null | wc -l)
-        log "  发现 ${snapshot_count} 个备份文件"
-        
         echo ""
-        log "${RED}  ⚠️  警告: 删除备份将无法恢复系统！${NC}"
-        read -p "是否删除所有备份? [y/N]: " del_backups
-        if [[ "$del_backups" =~ ^[Yy]$ ]]; then
-            rm -rf "$backup_dir/system_snapshots"
-            log "${GREEN}  ✓ 备份文件已删除: $backup_dir/system_snapshots${NC}"
-        else
-            log "${YELLOW}  ⊙ 备份文件已保留: $backup_dir/system_snapshots${NC}"
-        fi
-    else
-        log "${YELLOW}  ⚠ 未找到备份目录${NC}"
+        log "${RED}⚠️ 警告: 删除备份将无法恢复系统！${NC}"
+        read -p "删除所有备份? [y/N]: " del_backups
+        [[ "$del_backups" =~ ^[Yy]$ ]] && rm -rf "$backup_dir/system_snapshots"
     fi
     
-    # 8. 询问是否删除源代码目录（新增）
-    echo ""
-    log "${YELLOW}[8/9] 源代码目录处理...${NC}"
-    
-    # 检测可能的源代码目录
-    local source_dirs=()
-    
-    # 常见的源代码位置
-    [[ -d "/root/SnapSync" ]] && source_dirs+=("/root/SnapSync")
-    [[ -d "/root/snapsync" ]] && source_dirs+=("/root/snapsync")
-    [[ -d "$HOME/SnapSync" ]] && source_dirs+=("$HOME/SnapSync")
-    [[ -d "$HOME/snapsync" ]] && source_dirs+=("$HOME/snapsync")
-    
-    # 查找当前目录是否为源代码目录
-    if [[ -f "$(pwd)/install.sh" && -f "$(pwd)/snapsync.sh" ]]; then
-        local current_dir="$(pwd)"
-        # 检查是否已在列表中
-        local already_added=0
-        for dir in "${source_dirs[@]}"; do
-            if [[ "$dir" == "$current_dir" ]]; then
-                already_added=1
-                break
-            fi
-        done
-        [[ $already_added -eq 0 ]] && source_dirs+=("$current_dir")
-    fi
-    
-    if [[ ${#source_dirs[@]} -gt 0 ]]; then
-        log "  发现以下源代码目录:"
-        for dir in "${source_dirs[@]}"; do
-            echo "    • $dir"
-        done
-        echo ""
-        
-        read -p "是否删除这些源代码目录? [y/N]: " del_source
-        if [[ "$del_source" =~ ^[Yy]$ ]]; then
-            for dir in "${source_dirs[@]}"; do
-                if [[ -d "$dir" ]]; then
-                    # 如果当前在要删除的目录中，先切换到其他目录
-                    if [[ "$(pwd)" == "$dir"* ]]; then
-                        cd /root 2>/dev/null || cd / 2>/dev/null
-                        log "  → 已切换工作目录"
-                    fi
-                    
-                    rm -rf "$dir"
-                    log "${GREEN}  ✓ 已删除: $dir${NC}"
-                fi
-            done
-        else
-            log "${YELLOW}  ⊙ 源代码目录已保留${NC}"
-        fi
-    else
-        log "${YELLOW}  ⚠ 未找到源代码目录${NC}"
-    fi
-    
-    # 9. 清理临时文件
-    echo ""
-    log "${YELLOW}[9/9] 清理临时文件...${NC}"
-    rm -f /tmp/snapsync_* 2>/dev/null || true
-    rm -f /tmp/local_snapshots_*.txt 2>/dev/null || true
-    rm -f /tmp/remote_snapshots_*.txt 2>/dev/null || true
-    rm -f /tmp/delete_snapshots_*.txt 2>/dev/null || true
-    rm -f /tmp/restore_err.log 2>/dev/null || true
-    log "${GREEN}  ✓ 临时文件已清理${NC}"
-    
-    # 完成
-    echo ""
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    log "${GREEN}✓✓✓ 卸载完成！✓✓✓${NC}"
-    log "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    
-    log "已从系统中移除 SnapSync"
-    echo ""
-    
-    log "${YELLOW}已删除：${NC}"
-    echo "  ✓ 程序文件"
-    echo "  ✓ 系统服务"
-    echo "  ✓ 命令快捷方式"
-    
-    [[ "$del_config" =~ ^[Yy]$ ]] && echo "  ✓ 配置文件" || echo "  ⊙ 配置文件（保留）"
-    [[ "$del_logs" =~ ^[Yy]$ ]] && echo "  ✓ 日志文件" || echo "  ⊙ 日志文件（保留）"
-    [[ "$del_backups" =~ ^[Yy]$ ]] && echo "  ✓ 备份文件" || echo "  ⊙ 备份文件（保留）"
-    [[ "$del_source" =~ ^[Yy]$ ]] && echo "  ✓ 源代码目录" || echo "  ⊙ 源代码目录（保留）"
-    
-    echo ""
-    log "${CYAN}感谢使用 SnapSync！${NC}"
-    echo ""
-    
+    log "\n${GREEN}✓ 卸载完成${NC}\n"
     pause
-    
-    # 退出脚本
     exit 0
 }
 
@@ -822,30 +939,13 @@ main() {
     # 检查安装
     if [[ ! -d "$INSTALL_DIR" ]]; then
         log "${RED}错误: SnapSync 未正确安装${NC}"
-        log "${YELLOW}请运行安装脚本: sudo bash install.sh${NC}"
         exit 1
-    fi
-    
-    # 如果配置文件不存在，创建默认配置
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log "${YELLOW}警告: 配置文件不存在，创建默认配置...${NC}"
-        mkdir -p "$CONFIG_DIR"
-        cat > "$CONFIG_FILE" << 'EOF'
-#!/bin/bash
-BACKUP_DIR="/backups"
-TELEGRAM_ENABLED="false"
-REMOTE_ENABLED="false"
-LOCAL_KEEP_COUNT="5"
-COMPRESSION_LEVEL="6"
-PARALLEL_THREADS="auto"
-EOF
-        chmod 600 "$CONFIG_FILE"
     fi
     
     # 主循环
     while true; do
         show_main_menu
-        read -p "请选择 [0-9]: " choice
+        read -p "请选择 [0-10]: " choice
         
         case "$choice" in
             1) create_snapshot ;;
@@ -856,7 +956,8 @@ EOF
             6) clean_snapshots ;;
             7) view_logs ;;
             8) show_system_info ;;
-            9) uninstall_snapsync ;;
+            9) upgrade_snapsync ;;
+            10) uninstall_snapsync ;;
             0) log "${GREEN}感谢使用!${NC}"; exit 0 ;;
             *) log "${RED}无效选择${NC}"; sleep 1 ;;
         esac
