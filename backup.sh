@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# SnapSync v3.0 - 备份模块（完整修复版）
+# SnapSync v3.0 - 备份模块（空间检查修复版）
 
 set -euo pipefail
 
@@ -137,31 +137,79 @@ load_config() {
     log_info "  远程备份: ${REMOTE_ENABLED:-false}"
 }
 
-# ===== 系统检查 =====
+# ===== 系统检查（增强版 - 修复空间检查）=====
 check_system_resources() {
     log_info "${CYAN}检查系统资源...${NC}"
     
+    # 清理旧的临时文件
+    log_info "清理临时文件..."
+    find "$BACKUP_DIR/system_snapshots" -name "*.tmp" -mtime +1 -delete 2>/dev/null || true
+    find /tmp -name "backup_err_*.log" -mtime +1 -delete 2>/dev/null || true
+    find /tmp -name "test*.tar*" -mmin +60 -delete 2>/dev/null || true
+    
+    # 检查备份目录所在分区
     local disk_usage=$(df "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
     [[ ! "$disk_usage" =~ ^[0-9]+$ ]] && log_error "无法获取磁盘使用率" && return 1
     
+    # 检查可用空间（KB）
+    local disk_avail_kb=$(df "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+    local disk_avail_mb=$((disk_avail_kb / 1024))
+    local disk_avail_gb=$((disk_avail_kb / 1024 / 1024))
+    
+    # 估算需要的空间（系统大小的 40-60%，因为压缩）
+    log_info "估算所需空间..."
+    local system_size_kb=$(du -sk --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media --exclude="$BACKUP_DIR" / 2>/dev/null | awk '{print $1}' || echo "0")
+    local needed_mb=$((system_size_kb / 2 / 1024))  # 压缩后约 50%
+    local needed_with_buffer_mb=$((needed_mb * 13 / 10))  # 留 30% 缓冲
+    
+    log_info "系统大小: ~$((system_size_kb / 1024))MB (未压缩)"
+    log_info "预估备份: ~${needed_mb}MB (压缩后)"
+    log_info "建议可用: ~${needed_with_buffer_mb}MB (含缓冲)"
+    log_info "当前可用: ${disk_avail_mb}MB"
+    
+    # 检查磁盘使用率阈值
     if (( disk_usage > ${DISK_THRESHOLD:-90} )); then
-        log_error "磁盘空间不足: ${disk_usage}%"
+        log_error "磁盘使用率过高: ${disk_usage}%"
         send_telegram "❌ <b>备份失败</b>
 
 💾 磁盘使用率: ${disk_usage}%
 ⚠️ 阈值: ${DISK_THRESHOLD:-90}%
+📊 可用空间: ${disk_avail_gb}GB
 ⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
 
 请清理磁盘空间后重试"
         return 1
     fi
     
+    # 检查是否有足够的可用空间
+    if (( disk_avail_mb < needed_with_buffer_mb )); then
+        log_error "可用空间可能不足"
+        log_error "  可用: ${disk_avail_mb}MB"
+        log_error "  建议: ${needed_with_buffer_mb}MB"
+        
+        echo ""
+        echo -e "${YELLOW}⚠️ 警告: 磁盘空间可能不足${NC}"
+        echo "  当前可用: ${disk_avail_mb}MB"
+        echo "  预估需求: ${needed_with_buffer_mb}MB (含缓冲)"
+        echo ""
+        read -p "是否继续备份? [y/N]: " continue_backup
+        
+        if [[ ! "$continue_backup" =~ ^[Yy]$ ]]; then
+            log_info "用户取消备份"
+            return 1
+        fi
+        
+        log_info "用户选择继续备份"
+    fi
+    
     local disk_free=$(df -h "$BACKUP_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
     log_info "磁盘状态: 使用率 ${disk_usage}%, 可用 ${disk_free}"
+    log_success "空间检查通过"
+    
     return 0
 }
 
-# ===== 创建快照 =====
+# ===== 创建快照（增强错误捕获）=====
 create_snapshot() {
     local start_time=$(date +%s)
     local timestamp=$(date +"%Y%m%d%H%M%S")
@@ -237,28 +285,53 @@ create_snapshot() {
     
     log_info "开始创建归档 (${#valid_dirs[@]} 个目录: ${valid_dirs[*]})..."
     
-    # 执行备份
+    # 创建唯一的错误日志文件
+    local error_log="/tmp/backup_err_${timestamp}.log"
+    
+    # 执行备份（增强错误捕获）
     cd / && {
-        if tar "${tar_opts[@]}" "${valid_dirs[@]}" 2>/tmp/backup_err.log | $compress_cmd > "$temp_file"; then
-            if [[ ! -s "$temp_file" ]]; then
-                log_error "快照文件为空"
-                rm -f "$temp_file"
-                send_telegram "❌ <b>备份失败</b>
-
-原因: 生成的快照文件为空
-⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
-
-请检查日志: $LOG_FILE"
-                return 1
-            fi
+        # 使用命名管道捕获 tar 和 compress 的退出码
+        log_info "执行: tar | $compress_cmd > $temp_file"
+        
+        # 执行管道并立即保存退出码
+        tar "${tar_opts[@]}" "${valid_dirs[@]}" 2>"$error_log" | $compress_cmd > "$temp_file"
+        local pipe_status=("${PIPESTATUS[@]}")
+        local tar_status=${pipe_status[0]}
+        local compress_status=${pipe_status[1]}
+        
+        log_info "tar 退出码: $tar_status"
+        log_info "压缩退出码: $compress_status"
+        
+        # 检查是否成功
+        if [[ $tar_status -le 1 ]] && [[ $compress_status -eq 0 ]] && [[ -s "$temp_file" ]]; then
+            # tar 退出码 0 或 1 都是成功（1表示有文件在打包时被修改，可接受）
+            log_success "快照文件已创建"
+            
+            # 移动到最终位置
             mv "$temp_file" "$snapshot_file"
         else
-            local tar_error=$(cat /tmp/backup_err.log 2>/dev/null | tail -5)
-            log_error "tar失败: $tar_error"
+            # 失败处理
+            local tar_error=$(cat "$error_log" 2>/dev/null | tail -20)
+            
+            log_error "备份失败"
+            log_error "  tar 退出码: $tar_status"
+            log_error "  压缩退出码: $compress_status"
+            
+            if [[ -n "$tar_error" ]]; then
+                log_error "  错误信息: ${tar_error:0:500}"
+            fi
+            
+            # 检查具体失败原因
+            if [[ ! -s "$temp_file" ]]; then
+                log_error "  快照文件为空或不存在"
+            fi
+            
             rm -f "$temp_file"
+            
             send_telegram "❌ <b>备份失败</b>
 
-原因: tar 归档失败
+原因: tar 或压缩过程失败
+退出码: tar=$tar_status, 压缩=$compress_status
 错误: ${tar_error:0:200}
 ⏰ 时间: $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -266,6 +339,9 @@ create_snapshot() {
             return 1
         fi
     }
+    
+    # 清理错误日志
+    rm -f "$error_log"
     
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
