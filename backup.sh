@@ -3,6 +3,8 @@
 # SnapSync v3.0 - 备份模块（空间检查修复版）
 
 set -euo pipefail
+IFS=$'\n\t'
+umask 077
 
 # ===== 路径定义 =====
 CONFIG_FILE="/etc/snapsync/config.conf"
@@ -19,6 +21,8 @@ NC='\033[0m'
 # ===== 初始化 =====
 mkdir -p "$(dirname "$LOG_FILE")"
 
+TMP_FILES=()
+
 # ===== 工具函数 =====
 log_info() {
     echo -e "$(date '+%F %T') [INFO] $1" | tee -a "$LOG_FILE" >&2
@@ -32,42 +36,95 @@ log_success() {
     echo -e "$(date '+%F %T') ${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE" >&2
 }
 
+create_temp_file() {
+    local template="${1:-snapsync_XXXXXX}"
+    local temp_file
+    temp_file=$(mktemp "${TMPDIR:-/tmp}/${template}")
+    TMP_FILES+=("$temp_file")
+    printf '%s\n' "$temp_file"
+}
+
+run_curl() {
+    local had_xtrace=0
+    if [[ $- == *x* ]]; then
+        had_xtrace=1
+        set +x
+    fi
+
+    curl -sS --fail --connect-timeout 10 --max-time 30 "$@"
+    local rc=$?
+
+    if (( had_xtrace )); then
+        set -x
+    fi
+
+    return "$rc"
+}
+
+http_get() {
+    run_curl "$@"
+}
+
+http_post() {
+    run_curl -X POST "$@"
+}
+
+validate_ssh_key_permissions() {
+    local ssh_key="$1"
+    local perm
+
+    if [[ ! -f "$ssh_key" ]]; then
+        log_error "SSH key not found: $ssh_key"
+        return 1
+    fi
+
+    perm=$(stat -c %a "$ssh_key" 2>/dev/null || echo "")
+    if [[ "$perm" != "600" && "$perm" != "400" ]]; then
+        log_error "SSH key permissions are too open: $ssh_key ($perm)"
+        return 1
+    fi
+
+    return 0
+}
+
 # Telegram通知
 send_telegram() {
     local message="$1"
-    
-    local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
+    local tg_enabled
+    local hostname
+    local full_message
+    local response
+
+    tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
     if [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]]; then
         return 0
     fi
-    
+
     if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
         log_error "[TG] Telegram配置不完整"
-        return 1
+        return 0
     fi
-    
-    local hostname="${HOSTNAME:-$(hostname)}"
-    local vps_tag="🖥️ <b>${hostname}</b>"
-    local full_message="${vps_tag}
+
+    hostname="${HOSTNAME:-$(hostname)}"
+    full_message="🖥️ <b>${hostname}</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 ${message}"
-    
+
     log_info "[TG] 发送通知..."
-    
-    local response=$(curl -sS -m 15 -X POST \
+    response=$(http_post --max-time 15 \
         "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "text=${full_message}" \
         -d "parse_mode=HTML" \
-        -d "disable_web_page_preview=true" 2>&1)
-    
+        -d "disable_web_page_preview=true" 2>&1 || true)
+
     if echo "$response" | grep -q '"ok":true'; then
         log_success "[TG] 通知发送成功"
-        return 0
     else
         log_error "[TG] 通知发送失败: $response"
-        return 1
     fi
+
+    return 0
 }
 
 format_bytes() {
@@ -104,7 +161,15 @@ release_lock() {
     rm -f "$LOCK_FILE" 2>/dev/null || true
 }
 
-trap release_lock EXIT
+cleanup() {
+    release_lock
+
+    if ((${#TMP_FILES[@]})); then
+        rm -f "${TMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
 
 # ===== 加载配置 =====
 load_config() {
@@ -286,7 +351,8 @@ create_snapshot() {
     log_info "开始创建归档 (${#valid_dirs[@]} 个目录: ${valid_dirs[*]})..."
     
     # 创建唯一的错误日志文件
-    local error_log="/tmp/backup_err_${timestamp}.log"
+    local error_log
+    error_log=$(create_temp_file "backup_err_XXXXXX.log")
     
     # 执行备份（增强错误捕获）
     cd / && {
@@ -294,8 +360,10 @@ create_snapshot() {
         log_info "执行: tar | $compress_cmd > $temp_file"
         
         # 执行管道并立即保存退出码
+        set +e
         tar "${tar_opts[@]}" "${valid_dirs[@]}" 2>"$error_log" | $compress_cmd > "$temp_file"
         local pipe_status=("${PIPESTATUS[@]}")
+        set -e
         local tar_status=${pipe_status[0]}
         local compress_status=${pipe_status[1]}
         
@@ -419,6 +487,15 @@ sudo snapsync
         return 1
     fi
     
+    if ! validate_ssh_key_permissions "$ssh_key"; then
+        send_telegram "❌ <b>上传失败</b>
+
+原因: SSH 密钥权限过宽
+要求: 600 或 400
+时间: $(date '+%Y-%m-%d %H:%M:%S')"
+        return 1
+    fi
+
     local ssh_opts=(
         "-o" "StrictHostKeyChecking=no"
         "-o" "UserKnownHostsFile=/dev/null"

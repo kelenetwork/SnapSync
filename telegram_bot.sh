@@ -1,5 +1,9 @@
 #!/bin/bash
 
+set -euo pipefail
+IFS=$'\n\t'
+umask 077
+
 # SnapSync v3.0 - Telegram Bot（修复版）
 
 CONFIG_FILE="/etc/snapsync/config.conf"
@@ -15,7 +19,75 @@ BACKUP_DIR="${BACKUP_DIR:-/backups}"
 
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$OFFSET_FILE")"
 
+BOT_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/snapsync_XXXXXX")
+
 log() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"; }
+
+cleanup() {
+    [[ -d "$BOT_STATE_DIR" ]] && rm -rf "$BOT_STATE_DIR" 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
+
+snapshot_state_file() {
+    printf '%s/snapshots_%s.txt\n' "$BOT_STATE_DIR" "$1"
+}
+
+config_state_file() {
+    printf '%s/config_%s.txt\n' "$BOT_STATE_DIR" "$1"
+}
+
+run_curl() {
+    local had_xtrace=0
+    if [[ $- == *x* ]]; then
+        had_xtrace=1
+        set +x
+    fi
+
+    curl -sS --fail --connect-timeout 10 --max-time 30 "$@"
+    local rc=$?
+
+    if (( had_xtrace )); then
+        set -x
+    fi
+
+    return "$rc"
+}
+
+http_get() {
+    run_curl "$@"
+}
+
+http_post() {
+    run_curl -X POST "$@"
+}
+
+set_config_value() {
+    local key="$1"
+    local value="$2"
+    local temp_file
+    local escaped_value
+
+    temp_file=$(mktemp "${BOT_STATE_DIR}/config_XXXXXX")
+    printf -v escaped_value '%q' "$value"
+
+    awk -v key="$key" -v value="$escaped_value" '
+        BEGIN { updated = 0 }
+        $0 ~ ("^" key "=") {
+            print key "=" value
+            updated = 1
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print key "=" value
+            }
+        }
+    ' "$CONFIG_FILE" > "$temp_file"
+
+    mv "$temp_file" "$CONFIG_FILE"
+}
 
 format_bytes() {
     local b="$1"
@@ -27,34 +99,31 @@ format_bytes() {
 
 send_msg() {
     local cid="$1" txt="$2" kb="${3:-}"
-    local result=$(curl -sS -X POST "${API}/sendMessage" -d "chat_id=$cid" \
+    local result
+    result=$(http_post "${API}/sendMessage" -d "chat_id=$cid" \
         --data-urlencode "text=🖥️ <b>${HOST}</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-$txt" -d "parse_mode=HTML" ${kb:+-d "reply_markup=$kb"} 2>&1)
+$txt" -d "parse_mode=HTML" ${kb:+-d "reply_markup=$kb"} 2>&1 || true)
     log "发送消息: ${txt:0:30}... -> ${result:0:50}"
 }
 
 edit_msg() {
     local cid="$1" mid="$2" txt="$3" kb="${4:-}"
-    local result=$(curl -sS -X POST "${API}/editMessageText" \
+    local result
+    result=$(http_post "${API}/editMessageText" \
         -d "chat_id=$cid" \
         -d "message_id=$mid" \
         --data-urlencode "text=🖥️ <b>${HOST}</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 $txt" \
         -d "parse_mode=HTML" \
-        ${kb:+-d "reply_markup=$kb"} 2>&1)
+        ${kb:+-d "reply_markup=$kb"} 2>&1 || true)
     
     if echo "$result" | grep -q '"ok":false'; then
         log "编辑失败: ${result:0:100}"
     else
         log "编辑消息: $cid/$mid -> ${txt:0:30}..."
     fi
-}
-
-answer_cb() {
-    curl -sS -X POST "${API}/answerCallbackQuery" \
-        -d "callback_query_id=$1" -d "text=${2:-✓}" &>/dev/null
 }
 
 # 菜单定义
@@ -73,6 +142,12 @@ menu_compress='{"inline_keyboard":[[{"text":"1️⃣ 最快","callback_data":"cm
 menu_remote='{"inline_keyboard":[[{"text":"✅ 启用","callback_data":"rmt_on"}],[{"text":"❌ 禁用","callback_data":"rmt_off"}],[{"text":"🔙 返回配置","callback_data":"config"}]]}'
 
 # 命令处理
+answer_cb() {
+    http_post "${API}/answerCallbackQuery" \
+        -d "callback_query_id=$1" \
+        -d "text=${2:-OK}" &>/dev/null || true
+}
+
 cmd_start() {
     send_msg "$1" "🎯 <b>SnapSync 控制中心</b>
 
@@ -281,7 +356,8 @@ cb_delete() {
     fi
     
     # 保存快照列表到临时文件
-    local temp_file="/tmp/snapshots_$1.txt"
+    local temp_file
+    temp_file=$(snapshot_state_file "$1")
     printf "%s\n" "${snaps[@]}" > "$temp_file"
     log "快照列表已保存: $temp_file (${#snaps[@]} 个)"
     
@@ -344,7 +420,8 @@ cb_delete_confirm() {
     answer_cb "$3"
     
     # 读取快照列表
-    local temp_file="/tmp/snapshots_$1.txt"
+    local temp_file
+    temp_file=$(snapshot_state_file "$1")
     if [[ ! -f "$temp_file" ]]; then
         edit_msg "$1" "$2" "❌ <b>错误</b>
 
@@ -407,7 +484,8 @@ cb_delete_exec() {
     answer_cb "$3" "🗑️ 正在删除..."
     
     # 读取快照列表
-    local temp_file="/tmp/snapshots_$1.txt"
+    local temp_file
+    temp_file=$(snapshot_state_file "$1")
     if [[ ! -f "$temp_file" ]]; then
         edit_msg "$1" "$2" "❌ <b>删除失败</b>
 
@@ -505,7 +583,7 @@ cb_config_retention() {
 <code>10 60</code> - 本地保留10个，远程保留60天
 
 <i>发送配置或返回</i>" "$menu_back"
-    echo "cfg_retention" > "/tmp/config_$1.txt"
+    printf '%s\n' "cfg_retention" > "$(config_state_file "$1")"
 }
 
 cb_config_schedule() {
@@ -524,7 +602,7 @@ cb_config_schedule() {
 <code>7 03:00</code> - 每7天凌晨3点
 
 <i>发送配置或返回</i>" "$menu_back"
-    echo "cfg_schedule" > "/tmp/config_$1.txt"
+    printf '%s\n' "cfg_schedule" > "$(config_state_file "$1")"
 }
 
 cb_config_compress() {
@@ -565,7 +643,7 @@ cb_config_remote() {
 
 cb_compress_set() {
     answer_cb "$3" "✅ 压缩级别已设置为 $4"
-    sed -i "s|^COMPRESSION_LEVEL=.*|COMPRESSION_LEVEL=\"$4\"|" "$CONFIG_FILE"
+    set_config_value "COMPRESSION_LEVEL" "$4"
     cb_config "$1" "$2" "$3"
     log "压缩级别设置为: $4"
 }
@@ -574,7 +652,7 @@ cb_remote_toggle() {
     local v="false" st="禁用"
     [[ "$4" == "on" ]] && v="true" && st="启用"
     answer_cb "$3" "✅ 远程备份已${st}"
-    sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"$v\"|" "$CONFIG_FILE"
+    set_config_value "REMOTE_ENABLED" "$v"
     cb_config "$1" "$2" "$3"
     log "远程备份: $v"
 }
@@ -667,7 +745,8 @@ $res" "$menu_back"
 
 cb_test_tg() {
     answer_cb "$3" "⏳ 测试中..."
-    local test=$(curl -sS -m 10 "${API}/getMe" 2>&1)
+    local test
+    test=$(http_get --max-time 10 "${API}/getMe" 2>&1 || true)
     local res=""
     
     if echo "$test" | grep -q '"ok":true'; then
@@ -695,9 +774,10 @@ $res" "$menu_back"
 handle_text() {
     local cid="$1" txt="$2"
     
-    [[ "$txt" == "/start" ]] && rm -f "/tmp/config_$cid.txt" && cmd_start "$cid" && return
+    [[ "$txt" == "/start" ]] && rm -f "$(config_state_file "$cid")" && cmd_start "$cid" && return
     
-    local mode=$(cat "/tmp/config_$cid.txt" 2>/dev/null || echo "")
+    local mode
+    mode=$(cat "$(config_state_file "$cid")" 2>/dev/null || echo "")
     [[ -z "$mode" ]] && send_msg "$cid" "❓ 未知命令
 
 发送 /start 打开主菜单" "$menu_main" && return
@@ -706,13 +786,13 @@ handle_text() {
         cfg_retention)
             if [[ "$txt" =~ ^([0-9]+)\ +([0-9]+)$ ]]; then
                 local lk="${BASH_REMATCH[1]}" rk="${BASH_REMATCH[2]}"
-                sed -i "s|^LOCAL_KEEP_COUNT=.*|LOCAL_KEEP_COUNT=\"$lk\"|" "$CONFIG_FILE"
-                sed -i "s|^REMOTE_KEEP_DAYS=.*|REMOTE_KEEP_DAYS=\"$rk\"|" "$CONFIG_FILE"
+                set_config_value "LOCAL_KEEP_COUNT" "$lk"
+                set_config_value "REMOTE_KEEP_DAYS" "$rk"
                 send_msg "$cid" "✅ <b>保留策略已更新</b>
 
 📦 本地保留: ${lk} 个
 🌐 远程保留: ${rk} 天" "$menu_main"
-                rm -f "/tmp/config_$cid.txt"
+                rm -f "$(config_state_file "$cid")"
                 log "保留策略: local=$lk, remote=$rk"
             else
                 send_msg "$cid" "❌ <b>格式错误</b>
@@ -724,8 +804,8 @@ handle_text() {
         cfg_schedule)
             if [[ "$txt" =~ ^([0-9]+)\ +([0-9]{2}:[0-9]{2})$ ]]; then
                 local iv="${BASH_REMATCH[1]}" tm="${BASH_REMATCH[2]}"
-                sed -i "s|^BACKUP_INTERVAL_DAYS=.*|BACKUP_INTERVAL_DAYS=\"$iv\"|" "$CONFIG_FILE"
-                sed -i "s|^BACKUP_TIME=.*|BACKUP_TIME=\"$tm\"|" "$CONFIG_FILE"
+                set_config_value "BACKUP_INTERVAL_DAYS" "$iv"
+                set_config_value "BACKUP_TIME" "$tm"
                 send_msg "$cid" "✅ <b>备份计划已更新</b>
 
 ⏰ 间隔: 每 ${iv} 天
@@ -733,7 +813,7 @@ handle_text() {
 
 <i>需重启定时器生效</i>
 <code>systemctl restart snapsync-backup.timer</code>" "$menu_main"
-                rm -f "/tmp/config_$cid.txt"
+                rm -f "$(config_state_file "$cid")"
                 log "备份计划: interval=$iv, time=$tm"
             else
                 send_msg "$cid" "❌ <b>格式错误</b>
@@ -785,7 +865,7 @@ log "Bot 启动: $HOST"
 
 while true; do
     offset=$(cat "$OFFSET_FILE")
-    resp=$(curl -sS -m 25 "${API}/getUpdates?offset=$offset&timeout=20" 2>/dev/null || echo "")
+    resp=$(http_get --max-time 25 "${API}/getUpdates?offset=$offset&timeout=20" 2>/dev/null || echo "")
     
     [[ -z "$resp" ]] && sleep 1 && continue
     echo "$resp" | grep -q '"ok":true' || continue

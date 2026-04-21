@@ -4,6 +4,8 @@
 # 帮助排查为什么没有收到通知
 
 set -euo pipefail
+IFS=$'\n\t'
+umask 077
 
 # ===== 颜色定义 =====
 RED='\033[0;31m'
@@ -13,6 +15,47 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 CONFIG_FILE="/etc/snapsync/config.conf"
+
+mask_token() {
+    local token="${1:-}"
+
+    if [[ -z "$token" ]]; then
+        printf '%s\n' "<unset>"
+        return
+    fi
+
+    if ((${#token} <= 10)); then
+        printf '%s\n' "${token}"
+        return
+    fi
+
+    printf '%s\n' "${token:0:10}..."
+}
+
+run_curl() {
+    local had_xtrace=0
+    if [[ $- == *x* ]]; then
+        had_xtrace=1
+        set +x
+    fi
+
+    curl -sS --fail --connect-timeout 10 --max-time 30 "$@"
+    local rc=$?
+
+    if (( had_xtrace )); then
+        set -x
+    fi
+
+    return "$rc"
+}
+
+http_get() {
+    run_curl "$@"
+}
+
+http_post() {
+    run_curl -X POST "$@"
+}
 
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${CYAN}  Telegram 通知诊断工具${NC}"
@@ -77,7 +120,7 @@ if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     echo "  4. 设置: TELEGRAM_BOT_TOKEN=\"你的Token\""
     exit 1
 else
-    echo -e "${GREEN}${TELEGRAM_BOT_TOKEN:0:20}...${NC} (${#TELEGRAM_BOT_TOKEN}字符)"
+    echo -e "${GREEN}$(mask_token "$TELEGRAM_BOT_TOKEN")${NC} (${#TELEGRAM_BOT_TOKEN}字符)"
 fi
 
 echo -n "TELEGRAM_CHAT_ID: "
@@ -104,7 +147,7 @@ echo -e "${YELLOW}步骤3: 测试网络连接${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 echo -n "测试 Telegram API 可达性... "
-if curl -sS -m 10 https://api.telegram.org &>/dev/null; then
+if http_get --max-time 10 https://api.telegram.org &>/dev/null; then
     echo -e "${GREEN}✓ 可访问${NC}"
 else
     echo -e "${RED}✗ 无法访问${NC}"
@@ -126,7 +169,7 @@ echo -e "${YELLOW}步骤4: 测试Bot API${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 echo "调用 getMe API..."
-response=$(curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>&1)
+response=$(http_get --max-time 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" 2>&1 || true)
 
 if echo "$response" | grep -q '"ok":true'; then
     echo -e "${GREEN}✓ Bot API 响应正常${NC}"
@@ -170,11 +213,11 @@ test_message="🔍 <b>Telegram 诊断测试</b>
 <i>这是诊断工具自动发送的测试消息</i>"
 
 echo "正在发送测试消息到 Chat ID: ${TELEGRAM_CHAT_ID}..."
-send_response=$(curl -sS -m 15 -X POST \
+send_response=$(http_post --max-time 15 \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=${TELEGRAM_CHAT_ID}" \
     --data-urlencode "text=${test_message}" \
-    -d "parse_mode=HTML" 2>&1)
+    -d "parse_mode=HTML" 2>&1 || true)
 
 if echo "$send_response" | grep -q '"ok":true'; then
     echo -e "${GREEN}✓ 测试消息发送成功！${NC}"
@@ -206,7 +249,7 @@ else
         echo "解决方法:"
         echo "  1. 先在 Telegram 向 Bot 发送 /start 命令"
         echo "  2. 重新获取 Chat ID:"
-        echo "     ${CYAN}curl -s \"https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates\"${NC}"
+        echo "     ${CYAN}curl -s \"https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates\"${NC}"
         echo "  3. 在返回结果中找到: \"chat\":{\"id\":数字}"
         echo "  4. 更新配置文件中的 TELEGRAM_CHAT_ID"
     elif echo "$send_response" | grep -q "bot was blocked"; then

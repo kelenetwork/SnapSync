@@ -3,6 +3,8 @@
 # SnapSync v3.0 - 主控制脚本（完整版）
 
 set -euo pipefail
+IFS=$'\n\t'
+umask 077
 
 # ===== 版本信息 =====
 SNAPSYNC_VERSION="3.0.1"
@@ -24,6 +26,7 @@ CONFIG_DIR="/etc/snapsync"
 CONFIG_FILE="$CONFIG_DIR/config.conf"
 LOG_DIR="/var/log/snapsync"
 MODULE_DIR="$INSTALL_DIR/modules"
+TMP_FILES=()
 
 # ===== 权限检查 =====
 if [[ $EUID -ne 0 ]]; then
@@ -36,6 +39,70 @@ fi
 log() {
     mkdir -p "$LOG_DIR" 2>/dev/null || true
     echo -e "$(date '+%F %T') $*" | tee -a "$LOG_DIR/main.log" 2>/dev/null || echo -e "$*"
+}
+
+create_temp_file() {
+    local template="${1:-snapsync_XXXXXX}"
+    local temp_file
+    temp_file=$(mktemp "${TMPDIR:-/tmp}/${template}")
+    TMP_FILES+=("$temp_file")
+    printf '%s\n' "$temp_file"
+}
+
+cleanup() {
+    if ((${#TMP_FILES[@]})); then
+        rm -f "${TMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+run_curl() {
+    local had_xtrace=0
+    if [[ $- == *x* ]]; then
+        had_xtrace=1
+        set +x
+    fi
+
+    curl -sS --fail --connect-timeout 10 --max-time 30 "$@"
+    local rc=$?
+
+    if (( had_xtrace )); then
+        set -x
+    fi
+
+    return "$rc"
+}
+
+http_get() {
+    run_curl "$@"
+}
+
+set_config_value() {
+    local key="$1"
+    local value="$2"
+    local temp_file
+    local escaped_value
+
+    temp_file=$(create_temp_file "snapsync_config_XXXXXX")
+    printf -v escaped_value '%q' "$value"
+
+    awk -v key="$key" -v value="$escaped_value" '
+        BEGIN { updated = 0 }
+        $0 ~ ("^" key "=") {
+            print key "=" value
+            updated = 1
+            next
+        }
+        { print }
+        END {
+            if (!updated) {
+                print key "=" value
+            }
+        }
+    ' "$CONFIG_FILE" > "$temp_file"
+
+    mv "$temp_file" "$CONFIG_FILE"
 }
 
 show_header() {
@@ -191,11 +258,11 @@ configure_remote() {
         remote_path="${remote_path:-/backups}"
         
         # 更新配置
-        sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"true\"|" "$CONFIG_FILE"
-        sed -i "s|^REMOTE_HOST=.*|REMOTE_HOST=\"$remote_host\"|" "$CONFIG_FILE"
-        sed -i "s|^REMOTE_USER=.*|REMOTE_USER=\"$remote_user\"|" "$CONFIG_FILE"
-        sed -i "s|^REMOTE_PORT=.*|REMOTE_PORT=\"$remote_port\"|" "$CONFIG_FILE"
-        sed -i "s|^REMOTE_PATH=.*|REMOTE_PATH=\"$remote_path\"|" "$CONFIG_FILE"
+        set_config_value "REMOTE_ENABLED" "true"
+        set_config_value "REMOTE_HOST" "$remote_host"
+        set_config_value "REMOTE_USER" "$remote_user"
+        set_config_value "REMOTE_PORT" "$remote_port"
+        set_config_value "REMOTE_PATH" "$remote_path"
         
         log "${GREEN}✓ 远程服务器配置已保存${NC}"
         
@@ -219,7 +286,7 @@ configure_remote() {
         echo "  chmod 600 ~/.ssh/authorized_keys"
         
     else
-        sed -i "s|^REMOTE_ENABLED=.*|REMOTE_ENABLED=\"false\"|" "$CONFIG_FILE"
+        set_config_value "REMOTE_ENABLED" "false"
         log "${GREEN}✓ 远程备份已禁用${NC}"
     fi
     
@@ -252,21 +319,21 @@ configure_telegram() {
         echo ""
         log "${YELLOW}获取 Chat ID:${NC}"
         echo "  1. 向你的 Bot 发送任意消息"
-        echo "  2. 访问: https://api.telegram.org/bot${bot_token}/getUpdates"
+        echo "  2. 访问: https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates"
         echo "  3. 找到 \"chat\":{\"id\":数字}"
         echo ""
         
         read -p "输入 Chat ID: " chat_id
         
         # 更新配置
-        sed -i "s|^TELEGRAM_ENABLED=.*|TELEGRAM_ENABLED=\"true\"|" "$CONFIG_FILE"
-        sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=\"$bot_token\"|" "$CONFIG_FILE"
-        sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=\"$chat_id\"|" "$CONFIG_FILE"
+        set_config_value "TELEGRAM_ENABLED" "true"
+        set_config_value "TELEGRAM_BOT_TOKEN" "$bot_token"
+        set_config_value "TELEGRAM_CHAT_ID" "$chat_id"
         
         log "${GREEN}✓ Telegram 配置已保存${NC}"
         
     else
-        sed -i "s|^TELEGRAM_ENABLED=.*|TELEGRAM_ENABLED=\"false\"|" "$CONFIG_FILE"
+        set_config_value "TELEGRAM_ENABLED" "false"
         log "${GREEN}✓ Telegram 通知已禁用${NC}"
     fi
     
@@ -290,8 +357,8 @@ configure_retention() {
     read -p "远程保留天数 [30]: " remote_keep
     remote_keep="${remote_keep:-30}"
     
-    sed -i "s|^LOCAL_KEEP_COUNT=.*|LOCAL_KEEP_COUNT=\"$local_keep\"|" "$CONFIG_FILE"
-    sed -i "s|^REMOTE_KEEP_DAYS=.*|REMOTE_KEEP_DAYS=\"$remote_keep\"|" "$CONFIG_FILE"
+    set_config_value "LOCAL_KEEP_COUNT" "$local_keep"
+    set_config_value "REMOTE_KEEP_DAYS" "$remote_keep"
     
     log "${GREEN}✓ 保留策略已更新${NC}"
     pause
@@ -612,7 +679,7 @@ upgrade_snapsync() {
     
     # 检查网络连接
     log "检查网络连接..."
-    if ! curl -sS -m 10 --head https://github.com &>/dev/null; then
+    if ! http_get --max-time 10 --head https://github.com &>/dev/null; then
         log "${RED}✗ 无法连接到 GitHub${NC}"
         echo ""
         echo "请检查网络连接或防火墙设置"

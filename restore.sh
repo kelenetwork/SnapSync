@@ -4,6 +4,8 @@
 # 关键修复：远程快照下载后的路径处理
 
 set -euo pipefail
+IFS=$'\n\t'
+umask 077
 
 # ===== 路径定义 =====
 CONFIG_FILE="/etc/snapsync/config.conf"
@@ -18,6 +20,8 @@ NC='\033[0m'
 
 # ===== 初始化 =====
 mkdir -p "$(dirname "$LOG_FILE")"
+
+TMP_FILES=()
 
 # ===== 工具函数 =====
 log_info() {
@@ -36,6 +40,73 @@ log_warning() {
     echo -e "$(date '+%F %T') ${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE" >&2
 }
 
+create_temp_file() {
+    local template="${1:-snapsync_XXXXXX}"
+    local temp_file
+    temp_file=$(mktemp "${TMPDIR:-/tmp}/${template}")
+    TMP_FILES+=("$temp_file")
+    printf '%s\n' "$temp_file"
+}
+
+create_temp_dir() {
+    local template="${1:-snapsync_XXXXXX}"
+    local temp_dir
+    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/${template}")
+    TMP_FILES+=("$temp_dir")
+    printf '%s\n' "$temp_dir"
+}
+
+cleanup() {
+    if ((${#TMP_FILES[@]})); then
+        rm -rf "${TMP_FILES[@]}" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+run_curl() {
+    local had_xtrace=0
+    if [[ $- == *x* ]]; then
+        had_xtrace=1
+        set +x
+    fi
+
+    curl -sS --fail --connect-timeout 10 --max-time 30 "$@"
+    local rc=$?
+
+    if (( had_xtrace )); then
+        set -x
+    fi
+
+    return "$rc"
+}
+
+http_get() {
+    run_curl "$@"
+}
+
+http_post() {
+    run_curl -X POST "$@"
+}
+
+validate_ssh_key_permissions() {
+    local ssh_key="$1"
+    local perm
+
+    if [[ ! -f "$ssh_key" ]]; then
+        log_error "SSH key not found: $ssh_key"
+        return 1
+    fi
+
+    perm=$(stat -c %a "$ssh_key" 2>/dev/null || echo "")
+    if [[ "$perm" != "600" && "$perm" != "400" ]]; then
+        log_error "SSH key permissions are too open: $ssh_key ($perm)"
+        return 1
+    fi
+
+    return 0
+}
+
 send_telegram() {
     local tg_enabled=$(echo "${TELEGRAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')
     [[ "$tg_enabled" != "y" && "$tg_enabled" != "yes" && "$tg_enabled" != "true" ]] && return 0
@@ -46,7 +117,7 @@ send_telegram() {
 ━━━━━━━━━━━━━━━━━━━━━━━
 $1"
     
-    curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    http_post --max-time 15 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "text=${message}" \
         -d "parse_mode=HTML" &>/dev/null || true
@@ -82,6 +153,8 @@ load_config() {
 # ===== 列出远程快照（修复版）=====
 list_remote_snapshots() {
     local ssh_key="/root/.ssh/id_ed25519"
+
+    validate_ssh_key_permissions "$ssh_key" || return 1
     
     local ssh_opts=(
         "-o" "StrictHostKeyChecking=no"
@@ -244,6 +317,8 @@ download_remote_snapshot() {
 下载进行中..."
     
     local ssh_key="/root/.ssh/id_ed25519"
+
+    validate_ssh_key_permissions "$ssh_key" || return 1
     
     local ssh_opts=(
         "-o" "StrictHostKeyChecking=no"
@@ -452,8 +527,8 @@ verify_snapshot() {
 
 # ===== 备份关键配置 =====
 backup_critical_configs() {
-    local backup_dir="/tmp/snapsync_config_$$"
-    mkdir -p "$backup_dir"
+    local backup_dir
+    backup_dir=$(create_temp_dir "snapsync_config_XXXXXX")
     
     log_info "备份关键配置到: $backup_dir"
     
@@ -589,10 +664,23 @@ perform_restore() {
     echo "" >&2
     
     local start_time=$(date +%s)
+    local restore_err_log
+    restore_err_log=$(create_temp_file "restore_err_XXXXXX.log")
     
     # 执行
     cd / && {
-        if $decompress_cmd "$snapshot_file" 2>/tmp/restore_err.log | tar "${tar_opts[@]}" 2>&1 | tee -a "$LOG_FILE" >&2; then
+        local pipe_status=()
+        set +e
+        $decompress_cmd "$snapshot_file" 2>"$restore_err_log" | tar "${tar_opts[@]}" 2>&1 | tee -a "$LOG_FILE" >&2
+        local pipeline_rc=$?
+        pipe_status=("${PIPESTATUS[@]}")
+        set -e
+
+        local decompress_status=${pipe_status[0]:-1}
+        local tar_status=${pipe_status[1]:-1}
+        local tee_status=${pipe_status[2]:-1}
+
+        if [[ $pipeline_rc -eq 0 ]]; then
             local duration=$(($(date +%s) - start_time))
             
             echo "" >&2
@@ -611,7 +699,10 @@ perform_restore() {
             return 0
         else
             log_error "恢复失败"
-            cat /tmp/restore_err.log 2>/dev/null | tail -10 >&2
+            log_error "  decompress exit: $decompress_status"
+            log_error "  tar exit: $tar_status"
+            log_error "  tee exit: $tee_status"
+            tail -10 "$restore_err_log" 2>/dev/null >&2 || true
             
             [[ -n "$config_backup_dir" ]] && restore_critical_configs "$config_backup_dir"
             [[ -n "$config_backup_dir" ]] && rm -rf "$config_backup_dir"
