@@ -158,7 +158,7 @@ check_system_resources() {
     
     # 估算需要的空间（系统大小的 40-60%，因为压缩）
     log_info "估算所需空间..."
-    local system_size_kb=$(du -sk --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media --exclude="$BACKUP_DIR" / 2>/dev/null | awk '{print $1}' || echo "0")
+    local system_size_kb=$(du -skx --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media --exclude="$BACKUP_DIR" / 2>/dev/null | awk '{print $1}' || echo "0")
     local needed_mb=$((system_size_kb / 2 / 1024))  # 压缩后约 50%
     local needed_with_buffer_mb=$((needed_mb * 13 / 10))  # 留 30% 缓冲
     
